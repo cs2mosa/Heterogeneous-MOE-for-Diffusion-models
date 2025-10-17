@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.functional as F
-
+import model_internals as m
 
 class Router(nn.Module):
     def __init__(self):
