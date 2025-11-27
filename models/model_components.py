@@ -162,6 +162,7 @@ class Unet_block(nn.Module):
                     up: upsamples the input by (2 x 2)
                     down: downsamples the input by (2 x 2)
             :param Type: encoder or decoder -> enc | dec
+                Note: choosing 'enc' implies choosing 'down' in type ... to be consistent with Nvidia's diagram
             :param residual_balance: balance between the main branch and the residual branch of the block
             :param Dropout: usually 0.2
         """
@@ -192,25 +193,33 @@ class Unet_block(nn.Module):
             :return: processed output tensor of dimensions -> (batch , out_channels, new_height, new_width)
         """
         embedding = 1 + self.emb_layer(embedding,gain = self.emb_gain)
+        #up for decoders : down for encoders
         x = m.resample(x, mode=self.resample)
         if self.type == 'enc':
             if self.conv_skip is not None:
                 x = self.conv_skip(x)
             x = m.normalize(x,dim = [1])
+
         main_branch = self.conv_res1(m.mp_silu(x),gain = self.conv_gain1)
+        #embedding dimensions (batch,embedding_size) -> (batch, intermediate_channels,1,1) for broadcasting
         main_branch = main_branch * embedding.unsqueeze(2).unsqueeze(3).to(x.dtype)
         main_branch = m.mp_silu(main_branch)
+        #dropout only in training mode
         if self.training and self.dropout != 0:
             main_branch = F.dropout(main_branch, p= self.dropout)
 
         main_branch = self.conv_res2(main_branch,gain = self.conv_gain2)
+        #conv_skip for decoders in the residual branch
         if self.type == 'dec' and self.conv_skip is not None :
             x = self.conv_skip(x)
+
         return m.mp_sum(x,main_branch,t = self.residual_balance)
 
 
 class Vit_block(nn.Module):
     def __init__(self,
                  num_heads:int = 8,
-                 input_channels: int = 3):
+                 input_channels: int = 3
+
+                 ):
         super().__init__()
