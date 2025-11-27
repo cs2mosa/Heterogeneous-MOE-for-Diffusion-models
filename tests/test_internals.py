@@ -16,7 +16,8 @@ class TestMagnitudePreservingOps(unittest.TestCase):
         self.emb_dim = 128
         # Use a generous tolerance for stochastic variance checks
         self.tolerance = 1e-1
-
+        self.x = torch.randn(2, 3, 16, 16)
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     def test_mp_silu(self):
         """Test magnitude-preserving SiLU."""
         x = torch.randn(self.batch_size, self.channels, self.height, self.width)
@@ -92,6 +93,23 @@ class TestMagnitudePreservingOps(unittest.TestCase):
         self.assertEqual(out.shape, x.shape)
 
         self.assertAlmostEqual(np.sqrt(out.var().item()),np.sqrt(0.5), delta=self.tolerance)
+
+    def test_resample_mode_keep(self):
+        """Test that mode='keep' returns the exact same tensor."""
+        out = m.resample(self.x, mode='keep')
+        self.assertTrue(torch.equal(self.x, out))
+
+    def test_resample_shape_downsample(self):
+        """Test that downsampling halves the spatial dimensions."""
+        out = m.resample(self.x, mode='down')
+        expected_shape = (2, 3, 8, 8)
+        self.assertEqual(out.shape, expected_shape)
+
+    def test_resample_shape_upsample(self):
+        """Test that upsampling doubles the spatial dimensions."""
+        out = m.resample(self.x, mode='up')
+        expected_shape = (2, 3, 32, 32)
+        self.assertEqual(out.shape, expected_shape)
 
 if __name__ == '__main__':
     unittest.main(argv=['first-arg-is-ignored'], exit=False)

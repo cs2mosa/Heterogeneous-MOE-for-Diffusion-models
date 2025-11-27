@@ -5,11 +5,27 @@ import torch.nn.functional as F
 import models.model_internals as m
 
 class Scaling_router(nn.Module):
+    """
+    A Soft-Gating Network (Router) that generates continuous scaling factors for experts.
+
+    Unlike a Top-K router, this module assigns a weight to every expert. It is designed
+    to analyze the input image features and determine how much 'gain'
+    each expert path should receive.
+
+    Architecture:
+        Input -> CNN (Conv-BN-ReLU x2) -> Global Avg Pool -> Dropout -> Linear -> Softmax * 2
+    """
     def __init__(self,
                  in_channels: Optional[int] = 3,
                  num_experts: Optional[int] = 2,
-                 dropout :Optional[float] = 0.2):
-
+                 dropout :Optional[float] = 0.2
+                 ):
+        """
+        Args:
+            in_channels (int): Channels of the input feature map/image.
+            num_experts (int): Number of scaling factors to output (one per expert).
+            dropout (float): Dropout probability for regularization.
+        """
         super().__init__()
         self.soft_route = nn.Sequential(
             m.MP_Conv(in_channels=in_channels, out_channels=in_channels * 2, kernel=(3, 3)),# padding = same in all MP_conv
@@ -24,6 +40,16 @@ class Scaling_router(nn.Module):
         self.linear = m.MP_Conv(in_channels=in_channels * 4, out_channels= num_experts, kernel=())
 
     def forward(self, x: torch.Tensor, zeta: Optional[float] = 1e-2) -> torch.Tensor:
+        """
+        Args:
+            x (torch.Tensor): Input tensor (Batch, Channels, Height, Width).
+            zeta (float): Noise magnitude. Used to encourage exploration during training.
+                          Should ideally decay over time (e.g., 1e-2 -> 0).
+        Note: zeta should be inversely proportional with the number of training steps, using exponential decay for zeta in the training loop
+
+        Returns:
+            torch.Tensor: A tensor of shape (Batch, Num_Experts) containing scaling factors.
+        """
         batch_size, in_channels, height, width = x.size()
         # output probability dist. over the experts to use as weights multiplied with the input and passed through the next stage
         x = self.soft_route(x)
@@ -37,12 +63,29 @@ class Scaling_router(nn.Module):
         return scaling_output
 
 class Router(nn.Module):
+    """
+    A Sparse Top-K Gating Network (Router).
+
+    This module selects a subset (Top-K) of experts to process the input.
+    It returns a sparse weight vector (zeros for unselected experts) and the
+    raw probabilities (useful for load-balancing auxiliary losses).
+
+    Architecture:
+        Input -> Deeper CNN (Conv-BN-ReLU x3) -> Global Avg Pool -> Linear -> TopK Selection
+    """
     def __init__(self,
                  in_channels: Optional[int] = 3,
                  top_k: Optional[int] = 1,
                  num_experts: Optional[int] = 5,
-                 dropout :Optional[float] = 0.2):
-
+                 dropout :Optional[float] = 0.2
+                 ):
+        """
+        Args:
+            in_channels (int): Input channels.
+            top_k (int): How many experts to select active per sample.
+            num_experts (int): Total number of available experts.
+            dropout (float): Dropout probability.
+        """
         super().__init__()
         self.hard_route = nn.Sequential(
             m.MP_Conv(in_channels = in_channels, out_channels= in_channels * 2,kernel=(3,3)), #padding = same in all MP_conv
@@ -60,8 +103,21 @@ class Router(nn.Module):
         self.linear = m.MP_Conv(in_channels=in_channels * 4, out_channels= num_experts, kernel=())
         self.k = top_k
 
-    #zeta should be inversely proportional with the number of training steps
     def forward(self,x:torch.Tensor, zeta: Optional[float] = 1e-2)->tuple[torch.Tensor, torch.Tensor]:
+        """
+        Args:
+            x (torch.Tensor): Input tensor.
+            zeta (float): Noise magnitude for exploration.
+        Note:
+            zeta should be inversely proportional with the number of training steps, using exponential decay for zeta in the training loop
+        Returns:
+            tuple:
+                - sparse_gate_weights (torch.Tensor): Shape (B, Num_Experts).
+                  Contains weights for Top-K experts, 0.0 for others.
+                - gate_probs (torch.Tensor): Shape (B, Num_Experts).
+                  Full probability distribution (Softmax) across all experts.
+                  Used for calculating auxiliary load-balancing loss.
+        """
         batch_size, in_channels, height, width = x.size()
         x = self.hard_route(x)
         #shape before (batch_size, in_channels_in, height, width) -> (batch_size, in_channels_out * height * width)
@@ -81,22 +137,79 @@ class Router(nn.Module):
 
 
 class Unet_block(nn.Module):
+    """
+    the building block of the Unet experts in the Unet pathway , according to Nvidia's paper
+        Note: we made the kernel size a variable input to enforce architectural differences between each expert in the Unet path
+    """
     def __init__(self,
                  in_channels: int ,
                  out_channels: int ,
+                 kernel: tuple,
                  emb_size: int ,
-                 attention: Optional[bool] = False,
+                 resample: Optional[str] = 'keep',
                  Type: Optional[str] = 'enc',
-                 BottleNeck: Optional[bool] = False
+                 residual_balance: Optional[float] = 0.5,
+                 Dropout: Optional[float] = 0.2
                  ):
-
+        """
+        Args:
+            :param in_channels: number of input channels
+            :param out_channels: number of desired output channels
+            :param kernel: kernel size -> this is variable for every expert ... the only difference between this block and Nvidia's block
+            :param emb_size: embedding dimensions
+            :param resample:
+                    keep: returns the same input (identity function)
+                    up: upsamples the input by (2 x 2)
+                    down: downsamples the input by (2 x 2)
+            :param Type: encoder or decoder -> enc | dec
+            :param residual_balance: balance between the main branch and the residual branch of the block
+            :param Dropout: usually 0.2
+        """
         super().__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.emb_size = emb_size
-        self.attention = attention
+        self.residual_balance= residual_balance
+        self.type = Type
+        self.resample = resample
+        self.kernel = kernel
+        self.dropout =  Dropout
+        self.emb_gain = nn.Parameter(torch.zeros([]))
+        self.conv_gain1 = nn.Parameter(torch.zeros([]))
+        self.conv_gain2 = nn.Parameter(torch.zeros([]))
+        self.conv_skip = m.MP_Conv(in_channels = in_channels, out_channels=out_channels,kernel=(1, 1)) if in_channels != out_channels else None
+        self.emb_layer = m.MP_Conv(in_channels = emb_size, out_channels = out_channels,kernel=())
+        self.conv_res1 = m.MP_Conv(in_channels = out_channels if self.type == 'enc' else in_channels, out_channels= out_channels, kernel=self.kernel)
+        self.conv_res2 = m.MP_Conv(in_channels = out_channels, out_channels= out_channels, kernel=self.kernel)
 
-class Vit(nn.Module):
+    def forward(self, x:torch.Tensor, embedding:torch.Tensor) -> torch.Tensor:
+        """
+        the forward method of the Unet block
+        Args:
+            :param x: the input image tensor of dimensions -> (batch , in_channels, height, width)
+            :param embedding: embedding tensor for text and noise merged before the entry , dimensions -> (batch, embedding_size)
+                Note: concatenation with the skip connection must be done in the Full Unet class
+            :return: processed output tensor of dimensions -> (batch , out_channels, new_height, new_width)
+        """
+        embedding = 1 + self.emb_layer(embedding,gain = self.emb_gain)
+        x = m.resample(x, mode=self.resample)
+        if self.type == 'enc':
+            if self.conv_skip is not None:
+                x = self.conv_skip(x)
+            x = m.normalize(x,dim = [1])
+        main_branch = self.conv_res1(m.mp_silu(x),gain = self.conv_gain1)
+        main_branch = main_branch * embedding.unsqueeze(2).unsqueeze(3).to(x.dtype)
+        main_branch = m.mp_silu(main_branch)
+        if self.training and self.dropout != 0:
+            main_branch = F.dropout(main_branch, p= self.dropout)
+
+        main_branch = self.conv_res2(main_branch,gain = self.conv_gain2)
+        if self.type == 'dec' and self.conv_skip is not None :
+            x = self.conv_skip(x)
+        return m.mp_sum(x,main_branch,t = self.residual_balance)
+
+
+class Vit_block(nn.Module):
     def __init__(self,
                  num_heads:int = 8,
                  input_channels: int = 3):
