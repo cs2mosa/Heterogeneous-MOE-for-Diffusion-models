@@ -1,8 +1,11 @@
+import math
 from typing import Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+from sympy import false
+
 
 def normalize(x: torch.Tensor, dim: Optional[list[int]] = None, eps: int = 1e-4)-> torch.Tensor:
     """
@@ -193,6 +196,7 @@ class MP_Conv(nn.Module):
         return F.conv2d(x,w,padding = (w.shape[-1]//2,))
 
 #magnitude preserving attention (single and multi_head) layer as in EDM2 paper
+#note: we will try to use gated attention mechanism for FUSING the output of the 2 main paths
 class MP_Attention(nn.Module):
     """
     Magnitude Preserving Multi-Head Attention.
@@ -208,10 +212,12 @@ class MP_Attention(nn.Module):
     """
     def __init__(self,
                  num_heads: int ,
-                 emb_dim: int,
-                 context_dim :Optional[int] = None,
-                 attn_balance:int = 0.5,
-                 ):
+                 emb_dim: int ,
+                 seq_ln: int,
+                 time_dim: Optional[int] = 0 ,
+                 context_dim :Optional[int] = None ,
+                 attn_balance:Optional[float] = 0.5 ,
+                 is_cross_attn: Optional[bool] = False):
         """
         Args:
             num_heads (int): Number of attention heads.
@@ -225,28 +231,40 @@ class MP_Attention(nn.Module):
         self.num_heads = num_heads
         self.emb_dim = emb_dim
         self.head_dim = emb_dim // num_heads
-
+        self.time_emb = time_dim
         assert emb_dim % num_heads == 0
         if context_dim is None:
             context_dim = emb_dim
 
+        self.is_cross = is_cross_attn
         self.attn_balance = attn_balance
-        self.q_proj = MP_Conv(emb_dim,emb_dim,(1,1))
-        self.k_proj = MP_Conv(context_dim,emb_dim,(1,1))
-        self.v_proj = MP_Conv(context_dim,emb_dim,(1,1))
-        self.out_proj = MP_Conv(emb_dim,emb_dim,(1,1))
+        self.time_dependent = True if time_dim > 0 else False
+        self.rel_pos_bias = nn.Parameter(torch.zeros(self.num_heads, seq_ln,seq_ln)) if not is_cross_attn else None
+        self.q_proj = MP_Conv(emb_dim,emb_dim,kernel = (1,1))
+        self.k_proj = MP_Conv(context_dim,emb_dim,kernel = (1,1))
+        self.v_proj = MP_Conv(context_dim,emb_dim,kernel = (1,1))
+
+        self.q_time =  MP_Conv(time_dim,emb_dim,kernel = (1,1))if self.time_dependent else None
+        self.k_time = MP_Conv(time_dim,emb_dim,kernel = (1,1)) if self.time_dependent and not is_cross_attn else None
+        self.v_time = MP_Conv(time_dim,emb_dim,kernel = (1,1)) if self.time_dependent and not is_cross_attn else None
+
+        self.out_proj = MP_Conv(emb_dim,emb_dim,kernel = (1,1))
 
     def forward(self,
                 query: torch.Tensor,
-                gain: float,
-                context: Optional[torch.Tensor] = None
+                gain_s: float,
+                gain_t: float,
+                context: Optional[torch.Tensor] = None,
+                time_embedding: Optional[torch.Tensor] = None
                 )-> torch.Tensor:
         """
         Args:
             query (torch.Tensor): Input sequence. Shape (Batch, Seq_Len, Emb_Dim).
-            gain (float): Magnitude scaling factor passed to MP_Conv.
+            gain_s (float): Magnitude scaling factor passed to MP_Conv for spatial features.
+            gain_t (float): Magnitude scaling factor passed to MP_Conv for temporal features.
             context (torch.Tensor, optional): Context for cross-attention.
                                               Shape (Batch, Seq_Len_Ctx, Context_Dim).
+            time_embedding (torch.Tensor, optional):  The diffusion time step embedding used in TMSA for VIT experts
 
         Returns:
             torch.Tensor: Output tensor of shape (Batch, Seq_Len, Emb_Dim).
@@ -260,26 +278,49 @@ class MP_Attention(nn.Module):
         query = query.permute(0, 2, 1).unsqueeze(-1)
         context = context.permute(0, 2, 1).unsqueeze(-1)
 
-        q_proj = self.q_proj(query,gain = gain)
-        k_proj = self.k_proj(context,gain = gain)
-        v_proj = self.v_proj(context,gain = gain)
+        q_proj = self.q_proj(query,gain = gain_s)
+        k_proj = self.k_proj(context,gain = gain_s)
+        v_proj = self.v_proj(context,gain = gain_s)
+
+        if self.time_dependent and time_embedding is not None:
+            q_proj += self.q_time(time_embedding.view(batch_size, -1, 1, 1), gain = gain_t)
+            if not self.is_cross:
+                k_proj += self.k_time(time_embedding.view(batch_size, -1, 1, 1), gain = gain_t)
+                v_proj += self.v_time(time_embedding.view(batch_size, -1, 1, 1), gain = gain_t)
 
         #shape matches (batch,num_heads,seq_ln,head_dim)
         q_proj = q_proj.view(batch_size,self.num_heads,self.head_dim,-1).transpose(-1,-2)
         k_proj = k_proj.view(batch_size,self.num_heads,self.head_dim,-1).transpose(-1,-2)
         v_proj = v_proj.view(batch_size,self.num_heads,self.head_dim,-1).transpose(-1,-2)
 
-        #normalization across head_dim (originally emb_dim)
-        q_proj = normalize(q_proj,dim = [3])
-        k_proj = normalize(k_proj,dim = [3])
-
         #attention matrix multiplication
-        q_k_prod = torch.einsum('bnsh,bnsk->bnhk',q_proj,k_proj / np.sqrt(q_proj.shape[2])).softmax(dim = 3)
-        q_k_v_prod = torch.einsum('bnhk,bnsk->bnsh',q_k_prod,v_proj)
+        q_k_prod = torch.matmul(q_proj, k_proj.transpose(-2, -1))
+        q_k_prod = q_k_prod / np.sqrt(self.head_dim)
+        if not self.is_cross:
+            bias = self.rel_pos_bias
+            #handling variable seq_ln problem
+            if seq_len <= bias.shape[1]:
+                #slicing the bais when input has small seq_ln
+                bias = self.rel_pos_bias[:, :seq_len, :seq_len]
+            else:
+                #interpolation when the input has large seq_ln
+                bias_in = self.rel_pos_bias.unsqueeze(0)
+                bias = F.interpolate(
+                    bias_in,
+                    size=(seq_len, seq_len),
+                    mode='bicubic',
+                    align_corners=False
+                )
+                bias = bias.squeeze(0)
+
+            q_k_prod += bias
+
+        q_k_prod = q_k_prod.softmax(dim = -1)
+        q_k_v_prod = torch.matmul(q_k_prod,v_proj)
 
         attn_output = q_k_v_prod.transpose(1, 2).contiguous().view(batch_size, seq_len, emb_dim)
         attn_output_reshaped = attn_output.permute(0, 2, 1).unsqueeze(-1)
 
-        out = self.out_proj(attn_output_reshaped, gain=gain)
+        out = self.out_proj(attn_output_reshaped, gain=gain_s)
         out = out.squeeze(-1).permute(0, 2, 1)
         return mp_sum(res,out,self.attn_balance)

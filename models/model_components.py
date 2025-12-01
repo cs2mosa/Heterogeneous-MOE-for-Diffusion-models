@@ -42,7 +42,7 @@ class Scaling_router(nn.Module):
     def forward(self, x: torch.Tensor, zeta: Optional[float] = 1e-2) -> torch.Tensor:
         """
         Args:
-            x (torch.Tensor): Input tensor (Batch, Channels, Height, Width).
+            x (torch.Tensor): Input tensor .(typically a noise conditioning vector shaped as a 4d tensor)
             zeta (float): Noise magnitude. Used to encourage exploration during training.
                           Should ideally decay over time (e.g., 1e-2 -> 0).
         Note: zeta should be inversely proportional with the number of training steps, using exponential decay for zeta in the training loop
@@ -103,11 +103,12 @@ class Router(nn.Module):
         self.linear = m.MP_Conv(in_channels=in_channels * 4, out_channels= num_experts, kernel=())
         self.k = top_k
 
-    def forward(self,x:torch.Tensor, zeta: Optional[float] = 1e-2)->tuple[torch.Tensor, torch.Tensor]:
+    def forward(self,x:torch.Tensor, mask: Optional[torch.Tensor] | None, zeta: Optional[float] = 1e-2)->tuple[torch.Tensor, torch.Tensor]:
         """
         Args:
-            x (torch.Tensor): Input tensor.
+            x (torch.Tensor): Input tensor. (typically a noise conditioning vector shaped as a 4d tensor)
             zeta (float): Noise magnitude for exploration.
+            mask (torch.Tensor): mask for enhancing expert specialization, typically has dimensions as (batch , num_experts).
         Note:
             zeta should be inversely proportional with the number of training steps, using exponential decay for zeta in the training loop
         Returns:
@@ -127,7 +128,10 @@ class Router(nn.Module):
         #adding noise to encourage exploration in the early stages of training
         if self.training:
             x += torch.randn_like(x) * zeta
-        #for calculating the auxiliary loss
+
+        #mask output logit for expert specialization
+        x = x.masked_fill(mask == 0, float('-inf'))
+        # for calculating the auxiliary loss
         gate_probs = F.softmax(x,dim = -1)
         topk_vals, topk_indices = torch.topk(x, self.k, dim=-1)
         gating_weights = F.softmax(topk_vals,dim = -1)
@@ -218,8 +222,10 @@ class Unet_block(nn.Module):
 
 class Vit_block(nn.Module):
     def __init__(self,
-                 num_heads:int = 8,
-                 input_channels: int = 3
-
+                 num_heads:int ,
+                 in_channels: int ,
+                 out_channels: int ,
+                 res_balance: float = 0.5 ,
                  ):
         super().__init__()
+

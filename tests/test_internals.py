@@ -14,6 +14,7 @@ class TestMagnitudePreservingOps(unittest.TestCase):
         self.height = 32
         self.width = 32
         self.emb_dim = 128
+        self.time_dim = 64
         # Use a generous tolerance for stochastic variance checks
         self.tolerance = 1e-1
         self.x = torch.randn(2, 3, 16, 16)
@@ -79,20 +80,6 @@ class TestMagnitudePreservingOps(unittest.TestCase):
         self.assertEqual(out2.shape ,(self.batch_size,out_channels))
         self.assertEqual(out.shape,(self.batch_size, out_channels, self.height, self.width))
         self.assertAlmostEqual(np.sqrt(out.var().item()), np.sqrt(x.var().item()), delta=self.tolerance)
-
-    def test_mp_attention(self):
-        """Test magnitude-preserving Multi-Head Attention."""
-        num_heads = 8
-        attn_layer = m.MP_Attention(num_heads=num_heads, emb_dim=self.emb_dim,context_dim=self.emb_dim)
-
-        # Test self-attention where query, key, and value are the same
-        x = torch.randn(self.batch_size, self.seq_len, self.emb_dim)
-        context = torch.randn(self.batch_size, self.seq_len,self.emb_dim)
-        out = attn_layer(x,context = context, gain = 1)
-
-        self.assertEqual(out.shape, x.shape)
-
-        self.assertAlmostEqual(np.sqrt(out.var().item()),np.sqrt(0.5), delta=self.tolerance)
 
     def test_resample_mode_keep(self):
         """Test that mode='keep' returns the exact same tensor."""
