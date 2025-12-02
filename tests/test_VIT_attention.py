@@ -104,6 +104,13 @@ class TestVITAttention(unittest.TestCase):
         self.assertIsNotNone(q.grad, "Input Grad Missing")
         self.assertIsNotNone(ctx.grad, "Context Grad Missing")
         self.assertIsNotNone(t.grad, "Time Grad Missing")
+        grad_q_mag = q.grad.abs().sum().item()
+        grad_ctx_mag = ctx.grad.abs().sum().item()
+        grad_t_mag = t.grad.abs().sum().item()
+
+        self.assertGreater(grad_q_mag, 1e-6, f"Query gradient is effectively zero: {grad_q_mag}")
+        self.assertGreater(grad_ctx_mag, 1e-6, f"Context gradient is effectively zero: {grad_ctx_mag}")
+        self.assertGreater(grad_t_mag, 1e-6, f"Time gradient is effectively zero: {grad_t_mag}")
 
     def test_no_time_config(self):
         """Test 7: Does the model work if initialized without time dependence?"""

@@ -64,22 +64,63 @@ class TestMagnitudePreservingOps(unittest.TestCase):
         self.assertEqual(out.shape, (self.batch_size, num_features))
         self.assertAlmostEqual(np.sqrt(out.var().item()), 1.0, delta=self.tolerance)
 
-    def test_mp_conv_4d(self):
-        """Test magnitude-preserving 2D convolution (4D tensor)."""
+    def test_mp_conv_4d_with_gradients(self):
+        """Test magnitude-preserving convolution/linear with Gradient Flow check."""
         in_channels = self.channels
         out_channels = self.channels * 2
-        kernel_size = (3,3)
+        kernel_size = (3, 3)
+
+        # 1. Initialize Layers
         conv_layer = m.MP_Conv(in_channels, out_channels, kernel=kernel_size)
         lin_layer = m.MP_Conv(in_channels, out_channels, kernel=())
-        conv_layer.train()  # Ensure weights are copied
-        lin_layer.train()
-        x = torch.randn(self.batch_size, in_channels, self.height, self.width)
-        y = torch.randn(self.batch_size, in_channels)
+
+        # 2. Create Inputs with requires_grad=True
+        # This is CRITICAL. Without this, x.grad will always be None.
+        x = torch.randn(self.batch_size, in_channels, self.height, self.width, requires_grad=True)
+        y = torch.randn(self.batch_size, in_channels, requires_grad=True)
+
+        # --- Test Case A: Convolution (4D) Gradient Flow ---
         out = conv_layer(x)
+
+        # Check Shape (Existing check)
+        self.assertEqual(out.shape, (self.batch_size, out_channels, self.height, self.width))
+
+        # Create a dummy loss and backpropagate
+        loss_conv = out.mean()
+        loss_conv.backward()
+
+        # ASSERTIONS FOR CONV:
+        # 1. Did gradients reach the weights? (Parameter update check)
+        self.assertIsNotNone(conv_layer.weights.grad, "Conv Weight grad is None (Graph broken inside layer)")
+        self.assertNotEqual(conv_layer.weights.grad.abs().sum().item(), 0.0, "Conv Weight grad is zero")
+
+        # 2. Did gradients reach the input? (Backprop check)
+        self.assertIsNotNone(x.grad, "Input X grad is None (Graph broken at input)")
+        self.assertNotEqual(x.grad.abs().sum().item(), 0.0, "Input X grad is zero")
+
+        # --- Test Case B: Linear (2D) Gradient Flow ---
         out2 = lin_layer(y)
-        self.assertEqual(out2.shape ,(self.batch_size,out_channels))
-        self.assertEqual(out.shape,(self.batch_size, out_channels, self.height, self.width))
-        self.assertAlmostEqual(np.sqrt(out.var().item()), np.sqrt(x.var().item()), delta=self.tolerance)
+
+        # Check Shape (Existing check)
+        self.assertEqual(out2.shape, (self.batch_size, out_channels))
+
+        # Create a dummy loss and backpropagate
+        loss_lin = out2.mean()
+        loss_lin.backward()
+
+        # ASSERTIONS FOR LINEAR:
+        # 1. Did gradients reach the weights?
+        self.assertIsNotNone(lin_layer.weights.grad, "Linear Weight grad is None")
+        self.assertNotEqual(lin_layer.weights.grad.abs().sum().item(), 0.0, "Linear Weight grad is zero")
+
+        # 2. Did gradients reach the input?
+        self.assertIsNotNone(y.grad, "Input Y grad is None")
+        self.assertNotEqual(y.grad.abs().sum().item(), 0.0, "Input Y grad is zero")
+
+        # --- Optional: Variance Check (Existing check) ---
+        # Note: We detach() to stop tracking gradients for the variance calculation
+        with torch.no_grad():
+            self.assertAlmostEqual(np.sqrt(out.var().item()), np.sqrt(x.var().item()), delta=self.tolerance)
 
     def test_resample_mode_keep(self):
         """Test that mode='keep' returns the exact same tensor."""

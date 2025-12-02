@@ -153,7 +153,9 @@ class Unet_block(nn.Module):
                  resample: Optional[str] = 'keep',
                  Type: Optional[str] = 'enc',
                  residual_balance: Optional[float] = 0.5,
-                 Dropout: Optional[float] = 0.2
+                 Dropout: Optional[float] = 0.2,
+                 emb_gain: Optional[float] = 1.0,
+                 conv_gain: Optional[float] = 1.0
                  ):
         """
         Args:
@@ -179,9 +181,9 @@ class Unet_block(nn.Module):
         self.resample = resample
         self.kernel = kernel
         self.dropout =  Dropout
-        self.emb_gain = nn.Parameter(torch.zeros([]))
-        self.conv_gain1 = nn.Parameter(torch.zeros([]))
-        self.conv_gain2 = nn.Parameter(torch.zeros([]))
+        self.emb_gain = emb_gain
+        self.conv_gain1 = conv_gain
+        self.conv_gain2 = conv_gain
         self.conv_skip = m.MP_Conv(in_channels = in_channels, out_channels=out_channels,kernel=(1, 1)) if in_channels != out_channels else None
         self.emb_layer = m.MP_Conv(in_channels = emb_size, out_channels = out_channels,kernel=())
         self.conv_res1 = m.MP_Conv(in_channels = out_channels if self.type == 'enc' else in_channels, out_channels= out_channels, kernel=self.kernel)
@@ -223,9 +225,60 @@ class Unet_block(nn.Module):
 class Vit_block(nn.Module):
     def __init__(self,
                  num_heads:int ,
-                 in_channels: int ,
-                 out_channels: int ,
-                 res_balance: float = 0.5 ,
+                 num_groups: int,
+                 num_channels: int ,
+                 seq_ln: int ,
+                 emb_dim: int ,
+                 time_dim : Optional[int] = 0 ,
+                 res_balance: Optional[float] = 0.5 ,
+                 attn_balance: Optional[float] = 0.5 ,
+                 gain_s: Optional[float] = 1.0,
+                 gain_t: Optional[float] = 1.0,
                  ):
         super().__init__()
+        self.res_balance = res_balance
+        self.gain_s = gain_s
+        self.gain_t = gain_t
+        self.emb_dim = emb_dim
+        self.GN = nn.GroupNorm(num_groups=num_groups, num_channels=num_channels)
+        #instead of conv 3X3 we use linear layer before the block
+        self.linear1 = m.MP_Conv(num_channels,emb_dim,kernel = ())
+        self.norm1 = nn.LayerNorm(emb_dim)
+        self.norm2 = nn.LayerNorm(emb_dim)
+        self.TMSA = m.MP_Attention(num_heads= num_heads, emb_dim= emb_dim ,seq_ln= seq_ln ,time_dim= time_dim, attn_balance= attn_balance)
+        #MLP used after the TMSA attention
+        self.linear2 = m.MP_Conv(emb_dim,emb_dim*4,kernel = ())
+        self.linear3 = m.MP_Conv(emb_dim*4,emb_dim,kernel = ())
 
+    def forward(self, x: torch.Tensor, time_embedding: Optional[torch.Tensor] = None):
+        batch_size, seq_ln, input_channels = x.shape
+        res_main = x
+        #linear projection instead of conv 3X3 in the paper DIFFIT
+        x = x.transpose(1, 2)
+        x = m.mp_silu(self.GN(x))
+        x = x.transpose(1, 2)
+        x = x.reshape(batch_size * seq_ln, input_channels)
+        x = self.linear1(x, gain=self.gain_s)
+
+        #core tmsa block
+        res_attn = x
+        y = self.norm1(x)
+        y = y.reshape(batch_size, seq_ln, self.emb_dim)
+        y = self.TMSA(y, time_embedding=time_embedding, gain_s=self.gain_s, gain_t=self.gain_t)
+        y = y.reshape(batch_size * seq_ln, self.emb_dim)
+        y = m.mp_sum(y, res_attn, t=self.res_balance)
+        x = self.norm2(y)
+        x = m.mp_silu(self.linear2(x, gain=self.gain_s))
+        x = m.mp_silu(self.linear3(x, gain=self.gain_s))
+        x = m.mp_sum(x, y, t=self.res_balance)
+
+        # Reshape back to 3D
+        x = x.reshape(batch_size, seq_ln, self.emb_dim)
+
+        if input_channels != self.emb_dim:
+            # Dimensions changed (e.g., 4 -> 512). Cannot add residual.
+            # Return x (The transformed features)
+            return x
+        else:
+            # Dimensions match. Add Skip Connection.
+            return m.mp_sum(res_main, x, t=self.res_balance)

@@ -1,10 +1,8 @@
-import math
 from typing import Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from sympy import false
 
 
 def normalize(x: torch.Tensor, dim: Optional[list[int]] = None, eps: int = 1e-4)-> torch.Tensor:
@@ -172,7 +170,7 @@ class MP_Conv(nn.Module):
         assert self.weights.numel() != 0
         self.kernel = kernel
 
-    def forward(self,x: torch.Tensor, gain: int= 1)-> torch.Tensor:
+    def forward(self,x: torch.Tensor, gain: float= 1.0)-> torch.Tensor:
         """
         Forward pass with dynamic weight normalization and scaling.
 
@@ -188,10 +186,13 @@ class MP_Conv(nn.Module):
         w = self.weights.to(torch.float32)
         if self.training:
             with torch.no_grad():
-                w = self.weights.copy_(normalize(w))
-        w = (normalize(w) * (gain / np.sqrt(self.weights[0].numel()))).to(x.dtype)
+                self.weights.copy_(normalize(w))
+
+        w = normalize(w)  # traditional weight normalization
+        w = w * (gain / np.sqrt(w[0].numel()))  # magnitude-preserving scaling
+        w = w.to(x.dtype)
         if x.ndim == 2 :
-            return x @ w.t()
+            return F.linear(x,w)
         assert x.ndim == 4
         return F.conv2d(x,w,padding = (w.shape[-1]//2,))
 
@@ -222,10 +223,13 @@ class MP_Attention(nn.Module):
         Args:
             num_heads (int): Number of attention heads.
             emb_dim (int): Total dimensionality of the input embedding.
+            time_dim (int): the diffusion step embedding dimension
+            seq_ln (int):  sequence length of input tensor
             context_dim (int, optional): Dimensionality of the context (for Cross-Attention).
                                          If None, defaults to emb_dim (Self-Attention).
             attn_balance (float): Weight `t` for the residual connection in `mp_sum`.
                                   0.0 = Keep input, 1.0 = Use only attention output.
+            is_cross_attn (bool):  true for cross attention , default is false.
         """
         super().__init__()
         self.num_heads = num_heads
@@ -244,7 +248,7 @@ class MP_Attention(nn.Module):
         self.k_proj = MP_Conv(context_dim,emb_dim,kernel = (1,1))
         self.v_proj = MP_Conv(context_dim,emb_dim,kernel = (1,1))
 
-        self.q_time =  MP_Conv(time_dim,emb_dim,kernel = (1,1))if self.time_dependent else None
+        self.q_time = MP_Conv(time_dim,emb_dim,kernel = (1,1))if self.time_dependent else None
         self.k_time = MP_Conv(time_dim,emb_dim,kernel = (1,1)) if self.time_dependent and not is_cross_attn else None
         self.v_time = MP_Conv(time_dim,emb_dim,kernel = (1,1)) if self.time_dependent and not is_cross_attn else None
 
