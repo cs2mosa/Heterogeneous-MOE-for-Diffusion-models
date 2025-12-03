@@ -103,7 +103,7 @@ class Router(nn.Module):
         self.linear = m.MP_Conv(in_channels=in_channels * 4, out_channels= num_experts, kernel=())
         self.k = top_k
 
-    def forward(self,x:torch.Tensor, mask: Optional[torch.Tensor] | None, zeta: Optional[float] = 1e-2)->tuple[torch.Tensor, torch.Tensor]:
+    def forward(self,x:torch.Tensor, mask: Optional[torch.Tensor] = None, zeta: Optional[float] = 1e-2)->tuple[torch.Tensor, torch.Tensor]:
         """
         Args:
             x (torch.Tensor): Input tensor. (typically a noise conditioning vector shaped as a 4d tensor)
@@ -130,7 +130,9 @@ class Router(nn.Module):
             x += torch.randn_like(x) * zeta
 
         #mask output logit for expert specialization
-        x = x.masked_fill(mask == 0, float('-inf'))
+        if mask is not None:
+            x = x.masked_fill(mask == 0, float('-inf'))
+
         # for calculating the auxiliary loss
         gate_probs = F.softmax(x,dim = -1)
         topk_vals, topk_indices = torch.topk(x, self.k, dim=-1)
@@ -242,6 +244,7 @@ class Vit_block(nn.Module):
         self.emb_dim = emb_dim
         self.GN = nn.GroupNorm(num_groups=num_groups, num_channels=num_channels)
         #instead of conv 3X3 we use linear layer before the block
+        self.skip_proj = m.MP_Conv(num_channels, emb_dim, kernel=()) if num_channels != emb_dim else None
         self.linear1 = m.MP_Conv(num_channels,emb_dim,kernel = ())
         self.norm1 = nn.LayerNorm(emb_dim)
         self.norm2 = nn.LayerNorm(emb_dim)
@@ -264,21 +267,27 @@ class Vit_block(nn.Module):
         res_attn = x
         y = self.norm1(x)
         y = y.reshape(batch_size, seq_ln, self.emb_dim)
+
+        if time_embedding is not None and time_embedding.ndim == 2:
+            time_embedding = time_embedding[:, None, :]  # (B, 1, C)
+
         y = self.TMSA(y, time_embedding=time_embedding, gain_s=self.gain_s, gain_t=self.gain_t)
         y = y.reshape(batch_size * seq_ln, self.emb_dim)
         y = m.mp_sum(y, res_attn, t=self.res_balance)
         x = self.norm2(y)
         x = m.mp_silu(self.linear2(x, gain=self.gain_s))
-        x = m.mp_silu(self.linear3(x, gain=self.gain_s))
+        x = self.linear3(x, gain=self.gain_s)
         x = m.mp_sum(x, y, t=self.res_balance)
 
         # Reshape back to 3D
         x = x.reshape(batch_size, seq_ln, self.emb_dim)
 
-        if input_channels != self.emb_dim:
-            # Dimensions changed (e.g., 4 -> 512). Cannot add residual.
-            # Return x (The transformed features)
-            return x
+        if self.skip_proj is not None:
+            # project original residual to emb_dim (MP_Conv in linear mode)
+            res_proj = res_main.reshape(batch_size * seq_ln, input_channels)
+            res_proj = self.skip_proj(res_proj, gain=self.gain_s)
+            res_proj = res_proj.reshape(batch_size, seq_ln, self.emb_dim)
+            return m.mp_sum(res_proj, x, t=self.res_balance)
         else:
             # Dimensions match. Add Skip Connection.
             return m.mp_sum(res_main, x, t=self.res_balance)

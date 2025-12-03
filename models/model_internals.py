@@ -206,7 +206,7 @@ class MP_Attention(nn.Module):
     (Magnitude Preserving). It differs from standard "Dot-Product" attention in two ways:
 
     1. It uses MP_Conv for projections to preserve magnitude.
-    2. It computes "Channel Attention" (contracting over sequence length) rather than
+    2. It computes "Spatial Attention" (contracting over sequence length) rather than
        "Spatial Attention" (contracting over channel dimensions). This creates a
        (Head_Dim x Head_Dim) attention map instead of (Seq_Len x Seq_Len), making it
        much more memory efficient for long sequences (e.g., high-res images).
