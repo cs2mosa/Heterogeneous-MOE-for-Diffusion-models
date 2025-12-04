@@ -13,36 +13,38 @@ class Scaling_router(nn.Module):
     each expert path should receive.
 
     Architecture:
-        Input -> CNN (Conv-BN-ReLU x2) -> Global Avg Pool -> Dropout -> Linear -> Softmax * 2
+        Input -> MLP (Linear-BN1d-ReLU x2) -> Dropout -> Linear -> Softmax * 2
     """
     def __init__(self,
-                 in_channels: Optional[int] = 3,
+                 emb_dim: Optional[int] = 3,
                  num_experts: Optional[int] = 2,
                  dropout :Optional[float] = 0.2
                  ):
         """
         Args:
-            in_channels (int): Channels of the input feature map/image.
+            emb_dim (int): embedding dimension of the noise conditioning vector.
             num_experts (int): Number of scaling factors to output (one per expert).
             dropout (float): Dropout probability for regularization.
         """
         super().__init__()
         self.soft_route = nn.Sequential(
-            m.MP_Conv(in_channels=in_channels, out_channels=in_channels * 2, kernel=(3, 3)),# padding = same in all MP_conv
-            nn.BatchNorm2d(in_channels * 2),
+            m.MP_Conv(in_channels=emb_dim, out_channels=emb_dim * 2, kernel=()),# padding = same in all MP_conv
+            nn.BatchNorm1d(emb_dim * 2),
             nn.ReLU(),
-            m.MP_Conv(in_channels=in_channels * 2, out_channels=in_channels * 4, kernel=(3, 3)),
-            nn.BatchNorm2d(in_channels * 4),
+            m.MP_Conv(in_channels=emb_dim * 2, out_channels=emb_dim * 4, kernel=()),
+            nn.BatchNorm1d(emb_dim * 4),
             nn.ReLU(),
-            nn.AdaptiveAvgPool2d((1, 1)),
             nn.Dropout(dropout)
         )
-        self.linear = m.MP_Conv(in_channels=in_channels * 4, out_channels= num_experts, kernel=())
+        self.linear = m.MP_Conv(in_channels=emb_dim * 4, out_channels= num_experts, kernel=())
 
-    def forward(self, x: torch.Tensor, zeta: Optional[float] = 1e-2) -> torch.Tensor:
+    def forward(self,
+                x: torch.Tensor,
+                zeta: Optional[float] = 1e-2
+                ) -> torch.Tensor:
         """
         Args:
-            x (torch.Tensor): Input tensor .(typically a noise conditioning vector shaped as a 4d tensor)
+            x (torch.Tensor): Input tensor .(typically a noise conditioning vector shaped as a 2d tensor)
             zeta (float): Noise magnitude. Used to encourage exploration during training.
                           Should ideally decay over time (e.g., 1e-2 -> 0).
         Note: zeta should be inversely proportional with the number of training steps, using exponential decay for zeta in the training loop
@@ -50,14 +52,11 @@ class Scaling_router(nn.Module):
         Returns:
             torch.Tensor: A tensor of shape (Batch, Num_Experts) containing scaling factors.
         """
-        batch_size, in_channels, height, width = x.size()
-        # output probability dist. over the experts to use as weights multiplied with the input and passed through the next stage
         x = self.soft_route(x)
-        x = x.view(batch_size, -1)
-        # passing through a linear layer for projection on the selection space
         x = self.linear(x)
         if self.training:
             x += torch.randn_like(x) * zeta
+
         scaling_output = F.softmax(x,dim = -1) * 2
         # making sure that the dominant path gets scaled up while the other gets scaled down
         return scaling_output
@@ -71,10 +70,11 @@ class Router(nn.Module):
     raw probabilities (useful for load-balancing auxiliary losses).
 
     Architecture:
-        Input -> Deeper CNN (Conv-BN-ReLU x3) -> Global Avg Pool -> Linear -> TopK Selection
+        Input -> CNN (Conv-BN-ReLU x3) -> Global Avg Pool -> Linear -> TopK Selection
     """
     def __init__(self,
                  in_channels: Optional[int] = 3,
+                 time_dim: Optional[int] = 256,
                  top_k: Optional[int] = 1,
                  num_experts: Optional[int] = 5,
                  dropout :Optional[float] = 0.2
@@ -82,9 +82,15 @@ class Router(nn.Module):
         """
         Args:
             in_channels (int): Input channels.
+            time_dim (int): embedding dimension of noise vectors
             top_k (int): How many experts to select active per sample.
             num_experts (int): Total number of available experts.
             dropout (float): Dropout probability.
+        Forward Args:
+            x (torch.Tensor): Input tensor. (typically an image vector shaped as a 4d tensor)
+            time_emb (torch.Tensor): typically a noise conditioning vector of size (batch , time_emb)
+            zeta (float): Noise magnitude for exploration.
+            mask (torch.Tensor): mask for enhancing expert specialization, typically has dimensions as (batch , num_experts).
         """
         super().__init__()
         self.hard_route = nn.Sequential(
@@ -100,13 +106,21 @@ class Router(nn.Module):
             nn.AdaptiveAvgPool2d((1,1)),
             nn.Dropout(dropout)
         )
+        self.out_router = in_channels * 4
+        self.time_linear = m.MP_Conv(in_channels=time_dim, out_channels= self.out_router*2, kernel=())
         self.linear = m.MP_Conv(in_channels=in_channels * 4, out_channels= num_experts, kernel=())
         self.k = top_k
 
-    def forward(self,x:torch.Tensor, mask: Optional[torch.Tensor] = None, zeta: Optional[float] = 1e-2)->tuple[torch.Tensor, torch.Tensor]:
+    def forward(self,
+                x:torch.Tensor ,
+                time_emb :torch.Tensor,
+                mask: Optional[torch.Tensor] = None,
+                zeta: Optional[float] = 1e-2
+                )->tuple[torch.Tensor, torch.Tensor]:
         """
         Args:
-            x (torch.Tensor): Input tensor. (typically a noise conditioning vector shaped as a 4d tensor)
+            x (torch.Tensor): Input tensor. (typically an image vector shaped as a 4d tensor)
+            time_emb (torch.Tensor): typically a noise conditioning vector of size (batch , time_emb)
             zeta (float): Noise magnitude for exploration.
             mask (torch.Tensor): mask for enhancing expert specialization, typically has dimensions as (batch , num_experts).
         Note:
@@ -123,6 +137,10 @@ class Router(nn.Module):
         x = self.hard_route(x)
         #shape before (batch_size, in_channels_in, height, width) -> (batch_size, in_channels_out * height * width)
         x = x.view(batch_size,-1)
+        #time modulation with adaLN
+        cond = self.time_linear(m.mp_silu(time_emb))
+        gamma,beta = cond.chunk(2,dim =1)
+        x = x * (1 + gamma) + beta
         #passing through a linear layer for projection on the selection space
         x = self.linear(x)
         #adding noise to encourage exploration in the early stages of training
@@ -191,7 +209,10 @@ class Unet_block(nn.Module):
         self.conv_res1 = m.MP_Conv(in_channels = out_channels if self.type == 'enc' else in_channels, out_channels= out_channels, kernel=self.kernel)
         self.conv_res2 = m.MP_Conv(in_channels = out_channels, out_channels= out_channels, kernel=self.kernel)
 
-    def forward(self, x:torch.Tensor, embedding:torch.Tensor) -> torch.Tensor:
+    def forward(self,
+                x:torch.Tensor,
+                embedding:torch.Tensor
+                ) -> torch.Tensor:
         """
         the forward method of the Unet block
         Args:
@@ -225,6 +246,27 @@ class Unet_block(nn.Module):
 
 
 class Vit_block(nn.Module):
+    """
+    A Diffusion Vision Transformer (DiffiT) Block adapted for High-Noise/Latent processing.
+
+    This block implements a hybrid architecture that combines a local feature projection
+    (using GroupNorm and Linear layers) with a global Time-Dependent Multi-Head Self-Attention
+    (TMSA) mechanism. It is designed to operate within a Magnitude-Preserving (MP) framework,
+    ensuring variance stability across deep networks.
+
+    Architectural Changes from original DiffiT:
+        - Replaces the standard 3x3 Convolutional wrapper with a 1x1 Linear Projection.
+          This increases expressive power for high-noise/latent tokens where spatial
+          adjacency is less correlated than in pixel space.
+
+    Attributes:
+        GN (nn.GroupNorm): Group Normalization applied to input features.
+        linear1 (MP_Conv): Input projection layer (Input Dim -> Emb Dim).
+        TMSA (MP_Attention): Time-Dependent Self-Attention core.
+        linear2, linear3 (MP_Conv): Feed-forward MLP layers (expansion factor of 4).
+        skip_proj (MP_Conv, optional): Linear projection for the residual connection
+                                       if input_dim != emb_dim.
+    """
     def __init__(self,
                  num_heads:int ,
                  num_groups: int,
@@ -237,6 +279,21 @@ class Vit_block(nn.Module):
                  gain_s: Optional[float] = 1.0,
                  gain_t: Optional[float] = 1.0,
                  ):
+        """
+       Initializes the ViT Block.
+
+       Args:
+           num_heads (int): Number of attention heads.
+           num_groups (int): Number of groups for GroupNormalization.
+           num_channels (int): Input feature dimension (C_in).
+           seq_ln (int): Sequence length (Total number of tokens, H*W).
+           emb_dim (int): Internal embedding dimension for the Transformer (D).
+           time_dim (int, optional): Dimension of the time embedding vector. Defaults to 0.
+           res_balance (float, optional): Residual balance factor 't' for mp_sum. Defaults to 0.5.
+           attn_balance (float, optional): Attention balance factor. Defaults to 0.5.
+           gain_s (float, optional): Magnitude scaling factor for spatial signals. Defaults to 1.0.
+           gain_t (float, optional): Magnitude scaling factor for temporal signals. Defaults to 1.0.
+       """
         super().__init__()
         self.res_balance = res_balance
         self.gain_s = gain_s
@@ -253,7 +310,29 @@ class Vit_block(nn.Module):
         self.linear2 = m.MP_Conv(emb_dim,emb_dim*4,kernel = ())
         self.linear3 = m.MP_Conv(emb_dim*4,emb_dim,kernel = ())
 
-    def forward(self, x: torch.Tensor, time_embedding: Optional[torch.Tensor] = None):
+    def forward(self,
+                x: torch.Tensor,
+                time_embedding: Optional[torch.Tensor] = None
+                ) -> torch.Tensor:
+        """
+        Forward pass of the block.
+
+        The flow consists of:
+        1. Input Norm & Projection (GN -> SiLU -> Linear).
+        2. Time-Dependent Attention (TMSA) with residual connection.
+        3. Pointwise MLP with residual connection.
+        4. Final Skip Connection (Projecting original input if necessary).
+
+        Args:
+            x (torch.Tensor): Input sequence tensor.
+                              Shape: (Batch, Seq_Len, Input_Channels)
+            time_embedding (torch.Tensor, optional): Time step embedding vector.
+                                                     Shape: (Batch, Time_Dim) or (Batch, 1, Time_Dim).
+
+        Returns:
+            torch.Tensor: Processed tensor.
+                          Shape: (Batch, Seq_Len, Emb_Dim)
+        """
         batch_size, seq_ln, input_channels = x.shape
         res_main = x
         #linear projection instead of conv 3X3 in the paper DIFFIT

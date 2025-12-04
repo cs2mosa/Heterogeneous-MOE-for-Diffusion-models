@@ -6,12 +6,11 @@ class TestScalingRouter(unittest.TestCase):
     def setUp(self):
         """Set up a scaling router and dummy data for all tests."""
         self.batch_size = 8
-        self.in_channels = 3
-        self.image_dims = (32, 32)
+        self.emb_dim = 3
         self.num_paths = 2
 
-        self.router = m.Scaling_router(in_channels=self.in_channels, num_experts=self.num_paths)
-        self.dummy_input = torch.randn(self.batch_size, self.in_channels, *self.image_dims)
+        self.router = m.Scaling_router(emb_dim=self.emb_dim, num_experts=self.num_paths)
+        self.dummy_input = torch.randn(self.batch_size, self.emb_dim)
 
     def test_output_shape(self):
         """Checks if the output tensor has the correct shape [batch_size, num_paths]."""
@@ -55,19 +54,21 @@ class TestHardRouter(unittest.TestCase):
         self.channels = 3  # in_channels
         self.height = 32  # image_dims[0]
         self.width = 32
+        self.time_dim = 32
         self.top_k = 1
         self.router = m.Router(in_channels=self.channels,
                              top_k=self.top_k,
                              num_experts=self.num_experts)
         # Create routers with different top_k values to test parameterization
-        self.router_k1 = m.Router(in_channels=self.in_channels, num_experts=self.num_experts, top_k=1)
-        self.router_k2 = m.Router(in_channels=self.in_channels, num_experts=self.num_experts, top_k=2)
+        self.router_k1 = m.Router(in_channels=self.in_channels,time_dim=self.time_dim, num_experts=self.num_experts, top_k=1)
+        self.router_k2 = m.Router(in_channels=self.in_channels,time_dim=self.time_dim, num_experts=self.num_experts, top_k=2)
         self.dummy_input = torch.randn(self.batch_size, self.in_channels, *self.image_dims)
+        self.time_dummy = torch.randn(self.batch_size, self.time_dim)
 
     def test_output_shapes(self):
         """Checks if the two output tensors have the correct shape [batch_size, num_experts]."""
         self.router_k1.eval()
-        sparse_weights, gate_probs = self.router_k1(self.dummy_input)
+        sparse_weights, gate_probs = self.router_k1(x =self.dummy_input,time_emb = self.time_dummy)
         expected_shape = (self.batch_size, self.num_experts)
         self.assertEqual(sparse_weights.shape, expected_shape)
         self.assertEqual(gate_probs.shape, expected_shape)
@@ -75,14 +76,14 @@ class TestHardRouter(unittest.TestCase):
     def test_gate_probs_is_valid_distribution(self):
         """Checks if the dense gate_probs tensor is a valid probability distribution (sums to 1)."""
         self.router_k1.eval()
-        _, gate_probs = self.router_k1(self.dummy_input)
+        _, gate_probs = self.router_k1(x =self.dummy_input,time_emb = self.time_dummy)
         sum_of_probs = gate_probs.sum(dim=-1)
         self.assertTrue(torch.allclose(sum_of_probs, torch.tensor(1.0)))
 
     def test_sparsity_and_sum_top_k_1(self):
         """Checks for k=1 that exactly one expert is chosen and its weight is 1.0."""
         self.router_k1.eval()
-        sparse_weights, _ = self.router_k1(self.dummy_input)
+        sparse_weights, _ = self.router_k1(x =self.dummy_input,time_emb = self.time_dummy)
 
         # Check that each row has exactly k=1 non-zero elements
         non_zero_counts = torch.count_nonzero(sparse_weights, dim=-1)
@@ -95,7 +96,7 @@ class TestHardRouter(unittest.TestCase):
     def test_sparsity_and_sum_top_k_2(self):
         """Checks for k=2 that exactly two experts are chosen and their weights sum to 1.0."""
         self.router_k2.eval()
-        sparse_weights, _ = self.router_k2(self.dummy_input)
+        sparse_weights, _ = self.router_k2(x =self.dummy_input,time_emb = self.time_dummy)
 
         # Check that each row has exactly k=2 non-zero elements
         non_zero_counts = torch.count_nonzero(sparse_weights, dim=-1)
@@ -108,8 +109,8 @@ class TestHardRouter(unittest.TestCase):
     def test_eval_mode_is_deterministic(self):
         """Checks if two consecutive forward passes in eval mode produce identical results."""
         self.router_k1.eval()
-        sparse1, probs1 = self.router_k1(self.dummy_input)
-        sparse2, probs2 = self.router_k1(self.dummy_input)
+        sparse1, probs1 = self.router_k1(x =self.dummy_input,time_emb = self.time_dummy)
+        sparse2, probs2 = self.router_k1(x =self.dummy_input,time_emb = self.time_dummy)
         self.assertTrue(torch.equal(sparse1, sparse2))
         self.assertTrue(torch.equal(probs1, probs2))
 
@@ -130,7 +131,7 @@ class TestHardRouter(unittest.TestCase):
         # 2. Mask Expert Index 0 specifically for Batch Index 0
         mask[0, 0] = 0
 
-        weights, _ = self.router_k1(x, mask=mask)
+        weights, _ = self.router_k1(mask=mask,x =self.dummy_input,time_emb = self.time_dummy)
 
         # Check Batch 0, Expert 0 -> Should be 0.0
         self.assertEqual(weights[0, 0].item(), 0.0, "Masked expert 0 received non-zero weight!")
@@ -160,7 +161,7 @@ class TestHardRouter(unittest.TestCase):
         expert_outputs = torch.randn(self.batch_size, self.num_experts, 64, requires_grad=True)
 
         # Forward pass Router
-        weights, _ = self.router_k1(x, mask=mask)
+        weights, _ = self.router_k1(mask=mask,x =self.dummy_input,time_emb = self.time_dummy)
 
         # Forward pass "Mixture of Experts" simulation
         # Broadcast weights: (16, 5) -> (16, 5, 1)
