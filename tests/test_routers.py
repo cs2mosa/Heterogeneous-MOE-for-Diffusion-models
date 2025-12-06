@@ -116,9 +116,6 @@ class TestHardRouter(unittest.TestCase):
 
     def test_mask_enforcement_output(self):
         """ Test 1: Functionality - Are weights strictly zero where masked? """
-        # Generate input with (B, 3, 32, 32)
-        x = torch.randn(self.batch_size, self.channels, self.image_dims[0], self.image_dims[1])
-
         # Create a mask: (Batch, Num_Experts) -> (16, 5)
         # Default: All experts enabled
         mask = torch.ones(self.batch_size, self.num_experts)
@@ -150,7 +147,6 @@ class TestHardRouter(unittest.TestCase):
         """
         Test 2: The Critical Test - Do gradients stop flowing to masked experts?
         """
-        x = torch.randn(self.batch_size, self.channels, self.image_dims[0], self.image_dims[1])
 
         # Define the mask: Block Expert 0 entirely
         mask = torch.ones(self.batch_size, self.num_experts)

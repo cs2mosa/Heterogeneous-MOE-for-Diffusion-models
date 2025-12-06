@@ -29,10 +29,10 @@ class Scaling_router(nn.Module):
         super().__init__()
         self.soft_route = nn.Sequential(
             m.MP_Conv(in_channels=emb_dim, out_channels=emb_dim * 2, kernel=()),# padding = same in all MP_conv
-            nn.BatchNorm1d(emb_dim * 2),
+            nn.GroupNorm(1,emb_dim * 2),
             nn.ReLU(),
             m.MP_Conv(in_channels=emb_dim * 2, out_channels=emb_dim * 4, kernel=()),
-            nn.BatchNorm1d(emb_dim * 4),
+            nn.GroupNorm(1,emb_dim * 4),
             nn.ReLU(),
             nn.Dropout(dropout)
         )
@@ -95,13 +95,13 @@ class Router(nn.Module):
         super().__init__()
         self.hard_route = nn.Sequential(
             m.MP_Conv(in_channels = in_channels, out_channels= in_channels * 2,kernel=(3,3)), #padding = same in all MP_conv
-            nn.BatchNorm2d(in_channels * 2),
+            nn.GroupNorm(1,in_channels * 2),
             nn.ReLU(),
             m.MP_Conv(in_channels=in_channels * 2, out_channels=in_channels * 4, kernel=(3, 3)),
-            nn.BatchNorm2d(in_channels * 4),
+            nn.GroupNorm(1,in_channels * 4),
             nn.ReLU(),
             m.MP_Conv(in_channels = in_channels * 4, out_channels= in_channels * 4,kernel=(3,3)),
-            nn.BatchNorm2d(in_channels * 4),
+            nn.GroupNorm(1, in_channels * 4),
             nn.ReLU(),
             nn.AdaptiveAvgPool2d((1,1)),
             nn.Dropout(dropout)
@@ -244,6 +244,131 @@ class Unet_block(nn.Module):
 
         return m.mp_sum(x,main_branch,t = self.residual_balance)
 
+class Unet_expert(nn.Module):
+    def __init__(self,
+                 img_resolution: int,
+                 img_channels: int,
+                 time_emb_dim: int,
+                 text_emb_dim: int,
+                 channel_mult: list,
+                 model_channels: Optional[int] = 192,
+                 channel_mult_emb: Optional[int] = None,
+                 num_blocks: Optional[int] = 3,
+                 kernel_size: Optional[tuple] = (3, 3),
+                 label_balance: Optional[float] = 0.5,
+                 concat_balance: Optional[float] = 0.5,
+                 ):
+        super().__init__()
+        self.block_channels = [model_channels * i for i in channel_mult]
+        self.emb_size = model_channels * channel_mult_emb if channel_mult_emb is not None else max(self.block_channels)
+        self.label_balance = label_balance
+        self.concat_balance = concat_balance
+        self.out_gain = nn.Parameter(torch.zeros([]))
+        self.map_noise = m.MP_Conv(in_channels=time_emb_dim, out_channels=self.emb_size, kernel=())
+        self.map_text = m.MP_Conv(in_channels=text_emb_dim, out_channels=self.emb_size, kernel=()) if text_emb_dim > 0 else None
+        self.encoders = nn.ModuleDict()
+        #remeber to concatenate a 1's channel onto the image before passing it to the expert
+        self.out_channels = img_channels + 1
+        # _______________________________________________________________________________________________#
+        for level , channel in enumerate(self.block_channels):
+            res = img_resolution >> level
+            if level == 0:
+                in_channel = self.out_channels
+                self.out_channels = channel
+                self.encoders[f'{res}x{res}_conv'] = m.MP_Conv(in_channels= in_channel,
+                                                               out_channels= self.out_channels,
+                                                               kernel= kernel_size)
+            else:
+                self.encoders[f'{res}x{res}_down'] = Unet_block(in_channels= self.out_channels,
+                                                                out_channels=self.out_channels,
+                                                                kernel=kernel_size,
+                                                                Type='enc',
+                                                                resample= 'down',
+                                                                emb_size= self.emb_size
+                                                                )
+            for i in range(num_blocks):
+                in_channel = self.out_channels
+                self.out_channels = channel
+                self.encoders[f'{res}x{res}_block{i}'] = Unet_block(in_channels=in_channel,
+                                                                    out_channels= self.out_channels,
+                                                                    emb_size= self.emb_size,
+                                                                    Type= 'enc',
+                                                                    resample='keep',
+                                                                    kernel= kernel_size)
+        #_______________________________________________________________________________________________#
+        self.decoders = nn.ModuleDict()
+        skips = [block.out_channels for name, block in self.encoders.items()]
+        for level, channel in reversed(list(enumerate(self.block_channels))):
+            res = img_resolution >> level
+            if level == len(self.block_channels) - 1:
+                self.decoders[f'{res}x{res}_in0'] = Unet_block(in_channels=self.out_channels,
+                                                                    out_channels= self.out_channels,
+                                                                    emb_size= self.emb_size,
+                                                                    Type= 'dec',
+                                                                    resample='keep',
+                                                                    kernel= kernel_size)
+
+                self.decoders[f'{res}x{res}_in1'] = Unet_block(in_channels=self.out_channels,
+                                                                out_channels=self.out_channels,
+                                                                emb_size=self.emb_size,
+                                                                Type='dec',
+                                                                resample='keep',
+                                                                kernel=kernel_size)
+            else:
+                self.decoders[f'{res}x{res}_up'] = Unet_block(in_channels=self.out_channels,
+                                                                out_channels=self.out_channels,
+                                                                emb_size=self.emb_size,
+                                                                Type='dec',
+                                                                resample='up',
+                                                                kernel=kernel_size)
+
+            for i in range (num_blocks + 1):
+                in_channel = self.out_channels + skips.pop()
+                self.out_channels = channel
+                self.decoders[f'{res}x{res}_block{i}'] = Unet_block(in_channels=in_channel,
+                                                               out_channels=self.out_channels,
+                                                               emb_size=self.emb_size,
+                                                               Type='dec',
+                                                               resample='keep',
+                                                               kernel=kernel_size)
+        # _______________________________________________________________________________________________#
+        self.out_conv = m.MP_Conv(in_channels=self.out_channels, out_channels=img_channels, kernel=kernel_size)
+
+    def forward(self,
+                x: torch.Tensor ,
+                time_emb : torch.Tensor ,
+                text_emb :torch.Tensor
+                )-> torch.Tensor:
+
+        emb = self.map_noise(time_emb)
+        if self.map_text is not None and text_emb is not None:
+            txt = self.map_text(text_emb)
+            emb = m.mp_sum(emb,txt,t = self.label_balance)
+
+        emb = m.mp_silu(emb)
+        x = torch.cat([x, torch.ones_like(x[:, :1])], dim=1)
+        skips = []
+        for name, block in self.encoders.items():
+            if 'conv' in name:
+                # First layer is raw conv, no embedding needed
+                x = block(x)
+            else:
+                x = block(x, embedding=emb)
+            skips.append(x)
+
+        # 3. Decoder Pass
+        for name, block in self.decoders.items():
+            if 'block' in name:
+                # Retrieve Skip Connection
+                skip_x = skips.pop()
+                # Magnitude Preserving Concatenation
+                x = m.mp_cat(x, skip_x, t=self.concat_balance)
+
+            x = block(x, embedding=emb)
+
+        # 4. Final Output
+        x = self.out_conv(x, gain=self.out_gain)
+        return x
 
 class Vit_block(nn.Module):
     """
