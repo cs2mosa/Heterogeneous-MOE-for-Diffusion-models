@@ -128,7 +128,7 @@ def resample(x, f:Optional[list] = (1, 1), mode: Optional[str]='keep'):
 
 #magnitude preserving fourier features as in EDM2 paper
 class MP_Fourier(nn.Module):
-    def __init__(self,num_channels: int, bandwidth: int = 1 ):
+    def __init__(self,num_channels: int, bandwidth: float = 1 ):
         super().__init__()
         self.register_buffer('freqs', 2 * torch.pi * torch.randn(num_channels) * bandwidth)
         self.register_buffer('phases', 2 * torch.pi * torch.rand(num_channels))
@@ -139,6 +139,36 @@ class MP_Fourier(nn.Module):
         y = y + self.phases.to(torch.float32)
         y = y.cos() * np.sqrt(2)
         return y.to(x.dtype)
+
+class Pos_encoding(nn.Module):
+    def __init__(self,
+                 emb_dim:Optional[int] = 512,
+                 freq_emb_dim:Optional[int] = 256,
+                 max_period: Optional[int] = 10000):
+        super().__init__()
+        assert freq_emb_dim % 2 == 0
+        self.half_dim = freq_emb_dim // 2
+        self.max_period = max_period
+        self.mlp = nn.Sequential(
+            nn.Linear(in_features= freq_emb_dim,out_features=emb_dim),
+            nn.SiLU(),
+            nn.Linear(in_features=emb_dim,out_features= emb_dim),
+        )
+        expo = -1 * np.log(self.max_period) * torch.arange(start=0, end=self.half_dim,
+                                                           dtype=torch.float32) / self.half_dim
+        freq = torch.exp(expo)
+        self.register_buffer('freq',freq)
+
+    def forward(self,
+                time_vec: torch.Tensor
+                )->torch.Tensor:
+
+        if time_vec.ndim > 1:
+            time_vec = time_vec.flatten()
+        args = time_vec[:,None].float() * self.freq[None]
+        embedding = torch.cat([torch.cos(args),torch.sin(args)],dim = -1)
+        embedding = self.mlp(embedding)
+        return embedding
 
 #magnitude preserving convolution layer as in EDM2 paper
 class MP_Conv(nn.Module):

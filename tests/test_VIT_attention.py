@@ -1,5 +1,4 @@
 import torch
-import numpy as np
 import unittest
 from models import model_internals as m
 

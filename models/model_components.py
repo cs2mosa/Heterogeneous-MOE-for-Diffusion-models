@@ -16,9 +16,9 @@ class Scaling_router(nn.Module):
         Input -> MLP (Linear-BN1d-ReLU x2) -> Dropout -> Linear -> Softmax * 2
     """
     def __init__(self,
-                 emb_dim: Optional[int] = 3,
+                 emb_dim    : Optional[int] = 3,
                  num_experts: Optional[int] = 2,
-                 dropout :Optional[float] = 0.2
+                 dropout    :Optional[float] = 0.2
                  ):
         """
         Args:
@@ -39,7 +39,7 @@ class Scaling_router(nn.Module):
         self.linear = m.MP_Conv(in_channels=emb_dim * 4, out_channels= num_experts, kernel=())
 
     def forward(self,
-                x: torch.Tensor,
+                x   : torch.Tensor,
                 zeta: Optional[float] = 1e-2
                 ) -> torch.Tensor:
         """
@@ -74,10 +74,10 @@ class Router(nn.Module):
     """
     def __init__(self,
                  in_channels: Optional[int] = 3,
-                 time_dim: Optional[int] = 256,
-                 top_k: Optional[int] = 1,
+                 time_dim   : Optional[int] = 256,
+                 top_k      : Optional[int] = 1,
                  num_experts: Optional[int] = 5,
-                 dropout :Optional[float] = 0.2
+                 dropout    :Optional[float] = 0.2
                  ):
         """
         Args:
@@ -112,10 +112,10 @@ class Router(nn.Module):
         self.k = top_k
 
     def forward(self,
-                x:torch.Tensor ,
+                x        :torch.Tensor ,
                 time_emb :torch.Tensor,
-                mask: Optional[torch.Tensor] = None,
-                zeta: Optional[float] = 1e-2
+                mask     : Optional[torch.Tensor] = None,
+                zeta     : Optional[float] = 1e-2
                 )->tuple[torch.Tensor, torch.Tensor]:
         """
         Args:
@@ -166,16 +166,16 @@ class Unet_block(nn.Module):
         Note: we made the kernel size a variable input to enforce architectural differences between each expert in the Unet path
     """
     def __init__(self,
-                 in_channels: int ,
-                 out_channels: int ,
-                 kernel: tuple,
-                 emb_size: int ,
-                 resample: Optional[str] = 'keep',
-                 Type: Optional[str] = 'enc',
+                 in_channels     : int ,
+                 out_channels    : int ,
+                 kernel          : tuple,
+                 emb_size        : int ,
+                 resample        : Optional[str] = 'keep',
+                 Type            : Optional[str] = 'enc',
                  residual_balance: Optional[float] = 0.5,
-                 Dropout: Optional[float] = 0.2,
-                 emb_gain: Optional[float] = 1.0,
-                 conv_gain: Optional[float] = 1.0
+                 Dropout         : Optional[float] = 0.2,
+                 emb_gain        : Optional[float] = 1.0,
+                 conv_gain       : Optional[float] = 1.0
                  ):
         """
         Args:
@@ -210,7 +210,7 @@ class Unet_block(nn.Module):
         self.conv_res2 = m.MP_Conv(in_channels = out_channels, out_channels= out_channels, kernel=self.kernel)
 
     def forward(self,
-                x:torch.Tensor,
+                x        :torch.Tensor,
                 embedding:torch.Tensor
                 ) -> torch.Tensor:
         """
@@ -246,17 +246,17 @@ class Unet_block(nn.Module):
 
 class Unet_expert(nn.Module):
     def __init__(self,
-                 img_resolution: int,
-                 img_channels: int,
-                 time_emb_dim: int,
-                 text_emb_dim: int,
-                 channel_mult: list,
-                 model_channels: Optional[int] = 192,
+                 img_resolution  : int,
+                 img_channels    : int,
+                 time_emb_dim    : int,
+                 text_emb_dim    : int,
+                 channel_mult    : list,
+                 model_channels  : Optional[int] = 192,
                  channel_mult_emb: Optional[int] = None,
-                 num_blocks: Optional[int] = 3,
-                 kernel_size: Optional[tuple] = (3, 3),
-                 label_balance: Optional[float] = 0.5,
-                 concat_balance: Optional[float] = 0.5,
+                 num_blocks      : Optional[int] = 3,
+                 kernel_size     : Optional[tuple] = (3, 3),
+                 label_balance   : Optional[float] = 0.5,
+                 concat_balance  : Optional[float] = 0.5,
                  ):
         super().__init__()
         self.block_channels = [model_channels * i for i in channel_mult]
@@ -267,7 +267,6 @@ class Unet_expert(nn.Module):
         self.map_noise = m.MP_Conv(in_channels=time_emb_dim, out_channels=self.emb_size, kernel=())
         self.map_text = m.MP_Conv(in_channels=text_emb_dim, out_channels=self.emb_size, kernel=()) if text_emb_dim > 0 else None
         self.encoders = nn.ModuleDict()
-        #remeber to concatenate a 1's channel onto the image before passing it to the expert
         self.out_channels = img_channels + 1
         # _______________________________________________________________________________________________#
         for level , channel in enumerate(self.block_channels):
@@ -335,7 +334,7 @@ class Unet_expert(nn.Module):
         self.out_conv = m.MP_Conv(in_channels=self.out_channels, out_channels=img_channels, kernel=kernel_size)
 
     def forward(self,
-                x: torch.Tensor ,
+                x        : torch.Tensor ,
                 time_emb : torch.Tensor ,
                 text_emb :torch.Tensor
                 )-> torch.Tensor:
@@ -350,23 +349,18 @@ class Unet_expert(nn.Module):
         skips = []
         for name, block in self.encoders.items():
             if 'conv' in name:
-                # First layer is raw conv, no embedding needed
                 x = block(x)
             else:
                 x = block(x, embedding=emb)
             skips.append(x)
 
-        # 3. Decoder Pass
         for name, block in self.decoders.items():
             if 'block' in name:
-                # Retrieve Skip Connection
                 skip_x = skips.pop()
-                # Magnitude Preserving Concatenation
                 x = m.mp_cat(x, skip_x, t=self.concat_balance)
 
             x = block(x, embedding=emb)
 
-        # 4. Final Output
         x = self.out_conv(x, gain=self.out_gain)
         return x
 
@@ -393,16 +387,17 @@ class Vit_block(nn.Module):
                                        if input_dim != emb_dim.
     """
     def __init__(self,
-                 num_heads:int ,
-                 num_groups: int,
-                 num_channels: int ,
-                 seq_ln: int ,
-                 emb_dim: int ,
-                 time_dim : Optional[int] = 0 ,
-                 res_balance: Optional[float] = 0.5 ,
-                 attn_balance: Optional[float] = 0.5 ,
-                 gain_s: Optional[float] = 1.0,
-                 gain_t: Optional[float] = 1.0,
+                 num_heads    : int ,
+                 num_groups   : int,
+                 num_channels : int ,
+                 seq_ln       : int ,
+                 emb_dim      : int ,
+                 resample     : Optional[str] = 'keep',
+                 time_dim     : Optional[int] = 0 ,
+                 res_balance  : Optional[float] = 0.5 ,
+                 attn_balance : Optional[float] = 0.5 ,
+                 gain_s       : Optional[float] = 1.0,
+                 gain_t       : Optional[float] = 1.0,
                  ):
         """
        Initializes the ViT Block.
@@ -424,6 +419,7 @@ class Vit_block(nn.Module):
         self.gain_s = gain_s
         self.gain_t = gain_t
         self.emb_dim = emb_dim
+        self.resample = resample
         self.GN = nn.GroupNorm(num_groups=num_groups, num_channels=num_channels)
         #instead of conv 3X3 we use linear layer before the block
         self.skip_proj = m.MP_Conv(num_channels, emb_dim, kernel=()) if num_channels != emb_dim else None
@@ -436,7 +432,7 @@ class Vit_block(nn.Module):
         self.linear3 = m.MP_Conv(emb_dim*4,emb_dim,kernel = ())
 
     def forward(self,
-                x: torch.Tensor,
+                x             : torch.Tensor,
                 time_embedding: Optional[torch.Tensor] = None
                 ) -> torch.Tensor:
         """
@@ -451,13 +447,14 @@ class Vit_block(nn.Module):
         Args:
             x (torch.Tensor): Input sequence tensor.
                               Shape: (Batch, Seq_Len, Input_Channels)
-            time_embedding (torch.Tensor, optional): Time step embedding vector.
+            time_embedding (torch.Tensor, optional): Time step embedding vector added with the label embedding vector.
                                                      Shape: (Batch, Time_Dim) or (Batch, 1, Time_Dim).
 
         Returns:
             torch.Tensor: Processed tensor.
                           Shape: (Batch, Seq_Len, Emb_Dim)
         """
+        x = m.resample(x, mode=self.resample)
         batch_size, seq_ln, input_channels = x.shape
         res_main = x
         #linear projection instead of conv 3X3 in the paper DIFFIT
@@ -495,3 +492,79 @@ class Vit_block(nn.Module):
         else:
             # Dimensions match. Add Skip Connection.
             return m.mp_sum(res_main, x, t=self.res_balance)
+
+class Vit_expert(nn.Module):
+
+    def __init__(self,
+                 num_heads   : int,
+                 num_groups  : int,
+                 num_channels: int,
+                 seq_ln      : int,
+                 emb_dim     : int,
+                 num_blocks  : int,
+                 patch_size  : int,
+                 resample    : Optional[str] = 'keep',
+                 time_dim    : Optional[int] = 0 ,
+                 text_dim    : Optional[int] = 0,
+                 res_balance : Optional[float] = 0.5 ,
+                 attn_balance: Optional[float] = 0.5 ,
+                 emb_balance: Optional[float] = 0.5,
+                 gain_s      : Optional[float] = 1.0,
+                 gain_t      : Optional[float] = 1.0,
+                 ):
+
+        super().__init__()
+        self.seq_ln = seq_ln
+        self.emb_balance = emb_balance
+        self.emb_dim = emb_dim
+        self.patch = nn.Conv2d(in_channels=num_channels,out_channels=emb_dim,kernel_size=patch_size,stride=patch_size)
+        self.map_txt = m.MP_Conv(in_channels=text_dim,out_channels=time_dim,kernel=()) if text_dim != time_dim and text_dim != 0 else None
+        self.pos_emb = nn.Parameter(torch.zeros(1,seq_ln,emb_dim))
+        self.diffit = nn.ModuleList()
+        for i in range(num_blocks):
+            self.diffit.append(Vit_block(num_heads= num_heads,
+                                       num_groups=num_groups,
+                                       num_channels=emb_dim,
+                                       seq_ln=seq_ln,emb_dim=emb_dim,
+                                       resample=resample,
+                                       time_dim= time_dim,
+                                       res_balance=res_balance,
+                                       attn_balance=attn_balance,
+                                       gain_s=gain_s,
+                                       gain_t=gain_t))
+
+        self.norm = nn.LayerNorm(emb_dim)
+        self.unpatch_proj = m.MP_Conv(in_channels= emb_dim,out_channels=num_channels*(patch_size**2),kernel=())
+        self.unpatch = nn.PixelShuffle(upscale_factor=patch_size)
+
+    def forward(self,
+                x       : torch.Tensor,
+                time_emb: torch.Tensor = None,
+                text_emb: Optional[torch.Tensor] = None)->torch.Tensor:
+
+        x = self.patch(x)
+        batch, ch, h, w = x.shape
+        assert h * w == self.seq_ln, f"Sequence length mismatch: Got {h * w}, expected {self.seq_ln}"
+        x = x.flatten(2).transpose(1, 2)
+        x += self.pos_emb
+        if text_emb is not None:
+            if self.map_txt is not None:
+                text_emb = self.map_txt(text_emb)
+
+            time_emb = m.mp_sum(a=time_emb, b=text_emb, t=self.emb_balance)
+
+        for block in self.diffit:
+            x = block(x,time_embedding = time_emb)
+
+        x = self.norm(x)
+        x = x.reshape(batch * self.seq_ln, self.emb_dim)
+        x = self.unpatch_proj(x)
+
+        c_expanded = x.shape[-1]
+        x = x.reshape(batch, self.seq_ln, c_expanded)
+        x = x.transpose(1, 2).view(batch, c_expanded, h, w)
+        x = self.unpatch(x)
+        return x
+
+
+

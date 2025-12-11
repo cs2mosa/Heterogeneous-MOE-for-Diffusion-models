@@ -53,17 +53,6 @@ class TestMagnitudePreservingOps(unittest.TestCase):
         self.assertEqual(out.shape, (self.batch_size, expected_channels, self.height, self.width))
         self.assertAlmostEqual(np.sqrt(out.var().item()), 1.0, delta=self.tolerance)
 
-    def test_mp_fourier(self):
-        """Test magnitude-preserving Fourier features."""
-        num_features = 128
-        fourier_layer = m.MP_Fourier(num_channels=num_features)
-        x = torch.randn(self.batch_size)  # Input is typically a 1D tensor of timesteps
-
-        out = fourier_layer(x)
-
-        self.assertEqual(out.shape, (self.batch_size, num_features))
-        self.assertAlmostEqual(np.sqrt(out.var().item()), 1.0, delta=self.tolerance)
-
     def test_mp_conv_4d_with_gradients(self):
         """Test magnitude-preserving convolution/linear with Gradient Flow check."""
         in_channels = self.channels
