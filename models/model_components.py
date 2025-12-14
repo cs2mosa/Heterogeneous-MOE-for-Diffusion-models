@@ -9,8 +9,8 @@ class Scaling_router(nn.Module):
     A Soft-Gating Network (Router) that generates continuous scaling factors for experts.
 
     Unlike a Top-K router, this module assigns a weight to every expert. It is designed
-    to analyze the input image features and determine how much 'gain'
-    each expert path should receive.
+    to analyze the input noise features and determine how much 'gain'
+    each expert path should receive given that noise level.
 
     Architecture:
         Input -> MLP (Linear-BN1d-ReLU x2) -> Dropout -> Linear -> Softmax * 2
@@ -44,7 +44,7 @@ class Scaling_router(nn.Module):
                 ) -> torch.Tensor:
         """
         Args:
-            x (torch.Tensor): Input tensor .(typically a noise conditioning vector shaped as a 2d tensor)
+            x (torch.Tensor): Input tensor .(typically a noise conditioning vector shaped as a 2d tensor or 3d tensor of (b,1,c)
             zeta (float): Noise magnitude. Used to encourage exploration during training.
                           Should ideally decay over time (e.g., 1e-2 -> 0).
         Note: zeta should be inversely proportional with the number of training steps, using exponential decay for zeta in the training loop
@@ -52,6 +52,10 @@ class Scaling_router(nn.Module):
         Returns:
             torch.Tensor: A tensor of shape (Batch, Num_Experts) containing scaling factors.
         """
+        #squeezing the extra dimension if there is one
+        if x.ndim ==3:
+            x = x.squeeze(1)
+
         x = self.soft_route(x)
         x = self.linear(x)
         if self.training:
@@ -88,7 +92,7 @@ class Router(nn.Module):
             dropout (float): Dropout probability.
         Forward Args:
             x (torch.Tensor): Input tensor. (typically an image vector shaped as a 4d tensor)
-            time_emb (torch.Tensor): typically a noise conditioning vector of size (batch , time_emb)
+            time_emb (torch.Tensor): typically a noise conditioning vector of size (batch , time_emb) or (batch ,1, time_emb)
             zeta (float): Noise magnitude for exploration.
             mask (torch.Tensor): mask for enhancing expert specialization, typically has dimensions as (batch , num_experts).
         """
@@ -120,7 +124,7 @@ class Router(nn.Module):
         """
         Args:
             x (torch.Tensor): Input tensor. (typically an image vector shaped as a 4d tensor)
-            time_emb (torch.Tensor): typically a noise conditioning vector of size (batch , time_emb)
+            time_emb (torch.Tensor): typically a noise conditioning vector of size (batch , time_emb) , or (batch , 1, time_emb)
             zeta (float): Noise magnitude for exploration.
             mask (torch.Tensor): mask for enhancing expert specialization, typically has dimensions as (batch , num_experts).
         Note:
@@ -137,9 +141,13 @@ class Router(nn.Module):
         x = self.hard_route(x)
         #shape before (batch_size, in_channels_in, height, width) -> (batch_size, in_channels_out * height * width)
         x = x.view(batch_size,-1)
-        #time modulation with adaLN
+        #squeeze the extra dimension of the time if there is one
+        if time_emb.ndim == 3:
+            time_emb = time_emb.squeeze(1)
+
         cond = self.time_linear(m.mp_silu(time_emb))
         gamma,beta = cond.chunk(2,dim =1)
+        # time modulation with adaLN
         x = x * (1 + gamma) + beta
         #passing through a linear layer for projection on the selection space
         x = self.linear(x)
@@ -245,6 +253,31 @@ class Unet_block(nn.Module):
         return m.mp_sum(x,main_branch,t = self.residual_balance)
 
 class Unet_expert(nn.Module):
+    """
+    A Magnitude-Preserving U-Net Expert for Diffusion Models.
+
+    This architecture implements a symmetric Encoder-Decoder network with skip connections,
+    specifically designed for diffusion noise prediction. It features Magnitude Preserving (MP)
+    layers to maintain signal variance stability and flexible conditioning mechanisms.
+
+    Key Architectural Features:
+    1. **Input Augmentation**: Appends a constant channel of ones to the input to aid in
+       bias learning/signal reference.
+    2. **Conditioning**: Projects and mixes Time and Text embeddings using a learnable
+       balance factor (`label_balance`).
+    3. **Skip Connections**: Utilizes magnitude-preserving concatenation (`mp_cat`) to merge
+       encoder features with decoder features, controlled by `concat_balance`.
+    4. **Hierarchical Resolution**: Downsamples and Upsamples features according to
+       `channel_mult` factors.
+
+    Attributes:
+        map_noise (MP_Conv): Projector for time embeddings.
+        map_text (MP_Conv, optional): Projector for text embeddings.
+        encoders (nn.ModuleDict): Dictionary of encoder blocks (Conv, Downsample, ResBlocks).
+        decoders (nn.ModuleDict): Dictionary of decoder blocks (Upsample, ResBlocks).
+        out_conv (MP_Conv): Final projection layer to image space.
+        out_gain (nn.Parameter): Learnable scalar gain for the final output.
+    """
     def __init__(self,
                  img_resolution  : int,
                  img_channels    : int,
@@ -258,6 +291,26 @@ class Unet_expert(nn.Module):
                  label_balance   : Optional[float] = 0.5,
                  concat_balance  : Optional[float] = 0.5,
                  ):
+        """
+        Initializes the U-Net Expert.
+
+        Args:
+            img_resolution (int): Spatial resolution of the input image (Height/Width).
+            img_channels (int): Number of channels in the input image (e.g., 3 for RGB).
+            time_emb_dim (int): Dimension of the input time/noise embedding vector.
+            text_emb_dim (int): Dimension of the input text embedding vector.
+            channel_mult (list[int]): List of multipliers for `model_channels` at each resolution level.
+                                      Example: [1, 2, 2, 4] defines the channel depth at each stage.
+            model_channels (int, optional): Base number of feature channels. Defaults to 192.
+            channel_mult_emb (int, optional): Multiplier for the internal embedding dimension relative
+                                              to `model_channels`. If None, uses max channel size.
+            num_blocks (int, optional): Number of residual blocks per resolution level. Defaults to 3.
+            kernel_size (tuple, optional): Spatial convolution kernel size. Defaults to (3, 3).
+            label_balance (float, optional): Interpolation weight 't' for mixing Time and Text
+                                             embeddings via `mp_sum`. Defaults to 0.5.
+            concat_balance (float, optional): Interpolation weight 't' for merging skip connections
+                                             via `mp_cat`. Defaults to 0.5.
+        """
         super().__init__()
         self.block_channels = [model_channels * i for i in channel_mult]
         self.emb_size = model_channels * channel_mult_emb if channel_mult_emb is not None else max(self.block_channels)
@@ -338,9 +391,24 @@ class Unet_expert(nn.Module):
                 time_emb : torch.Tensor ,
                 text_emb :torch.Tensor
                 )-> torch.Tensor:
+        """
+        Forward pass of the U-Net.
 
+        Args:
+            x (torch.Tensor): Noisy input image tensor. Shape (Batch, img_channels, H, W).
+            time_emb (torch.Tensor): Time/Noise embedding vector. Shape (Batch, time_emb_dim).
+            text_emb (torch.Tensor): Text embedding vector. Shape (Batch, seq_ln ,text_emb_dim). or (Batch, text_emb_dim)
+
+        Returns:
+            torch.Tensor: Predicted output (e.g., noise or denoised image).
+                          Shape (Batch, img_channels, H, W).
+        """
         emb = self.map_noise(time_emb)
         if self.map_text is not None and text_emb is not None:
+            # txt_emb Shape transforms to -> (batch,text_emb_dim) if ndims = 3
+            if text_emb.ndim == 3:
+                text_emb = text_emb.mean(dim=1)
+
             txt = self.map_text(text_emb)
             emb = m.mp_sum(emb,txt,t = self.label_balance)
 
@@ -494,30 +562,71 @@ class Vit_block(nn.Module):
             return m.mp_sum(res_main, x, t=self.res_balance)
 
 class Vit_expert(nn.Module):
+    """
+    A Diffusion Vision Transformer (ViT) Expert.
 
+    This module implements an isotropic Transformer backbone designed for generative diffusion tasks.
+    It handles image tokenization via strided convolution, processes sequences using DiffiT-style blocks,
+    and reconstructs the image/latent space using PixelShuffle. It supports multi-modal conditioning
+    (Time + Text) via magnitude-preserving summation.
+
+    Key Features:
+    1. **Patchify/Unpatchify**: Converts images to sequences using Conv2d and reconstructs them
+       using Linear Projection + PixelShuffle.
+    2. **Isotropic Backbone**: Maintains a constant embedding dimension throughout the depth of the network.
+    3. **Conditioning Mixing**: Linearly interpolates between Time and Text embeddings based on
+       `emb_balance` to guide the denoising process.
+
+    Attributes:
+        patch (nn.Conv2d): Tokenizer layer (Image -> Patches).
+        map_txt (MP_Conv, optional): Projector to align text embedding dimensions with time embeddings.
+        pos_emb (nn.Parameter): Learnable absolute positional embeddings added to the sequence.
+        diffit (nn.ModuleList): Stack of `Vit_block` transformer layers.
+        norm (nn.LayerNorm): Final normalization layer.
+        unpatch_proj (MP_Conv): Linear projection to expand channels for PixelShuffle.
+        unpatch (nn.PixelShuffle): Reconstructs spatial resolution from channel depth.
+    """
     def __init__(self,
                  num_heads   : int,
                  num_groups  : int,
-                 num_channels: int,
+                 in_channels : int,
                  seq_ln      : int,
                  emb_dim     : int,
                  num_blocks  : int,
                  patch_size  : int,
-                 resample    : Optional[str] = 'keep',
-                 time_dim    : Optional[int] = 0 ,
+                 time_dim    : Optional[int] = 0,
                  text_dim    : Optional[int] = 0,
                  res_balance : Optional[float] = 0.5 ,
                  attn_balance: Optional[float] = 0.5 ,
-                 emb_balance: Optional[float] = 0.5,
+                 emb_balance : Optional[float] = 0.5,
                  gain_s      : Optional[float] = 1.0,
                  gain_t      : Optional[float] = 1.0,
                  ):
+        """
+        Initializes the ViT Expert.
 
+        Args:
+            num_heads (int): Number of attention heads in the transformer blocks.
+            num_groups (int): Number of groups for GroupNormalization.
+            in_channels (int): Number of channels in the input image/latent.
+            seq_ln (int): Expected sequence length (Total number of patches = H/P * W/P).
+            emb_dim (int): Internal hidden dimension of the transformer.
+            num_blocks (int): Depth of the network (number of layers).
+            patch_size (int): Spatial size of the patches used for tokenization.
+            time_dim (int, optional): Dimension of the input time embedding. Defaults to 0.
+            text_dim (int, optional): Dimension of the input text embedding. Defaults to 0.
+            res_balance (float, optional): Residual connection weight 't' for internal blocks. Defaults to 0.5.
+            attn_balance (float, optional): Attention output weight 't' for internal blocks. Defaults to 0.5.
+            emb_balance (float, optional): Interpolation weight 't' for mixing Time vs Text.
+                                           Final Emb = Time*(1-t) + Text*(t). Defaults to 0.5.
+            gain_s (float, optional): Magnitude gain for spatial signal path. Defaults to 1.0.
+            gain_t (float, optional): Magnitude gain for temporal/conditioning signal path. Defaults to 1.0.
+        """
         super().__init__()
         self.seq_ln = seq_ln
         self.emb_balance = emb_balance
         self.emb_dim = emb_dim
-        self.patch = nn.Conv2d(in_channels=num_channels,out_channels=emb_dim,kernel_size=patch_size,stride=patch_size)
+        self.patch = nn.Conv2d(in_channels=in_channels,out_channels=emb_dim,kernel_size=patch_size,stride=patch_size)
         self.map_txt = m.MP_Conv(in_channels=text_dim,out_channels=time_dim,kernel=()) if text_dim != time_dim and text_dim != 0 else None
         self.pos_emb = nn.Parameter(torch.zeros(1,seq_ln,emb_dim))
         self.diffit = nn.ModuleList()
@@ -526,7 +635,7 @@ class Vit_expert(nn.Module):
                                        num_groups=num_groups,
                                        num_channels=emb_dim,
                                        seq_ln=seq_ln,emb_dim=emb_dim,
-                                       resample=resample,
+                                       resample='keep',
                                        time_dim= time_dim,
                                        res_balance=res_balance,
                                        attn_balance=attn_balance,
@@ -534,21 +643,36 @@ class Vit_expert(nn.Module):
                                        gain_t=gain_t))
 
         self.norm = nn.LayerNorm(emb_dim)
-        self.unpatch_proj = m.MP_Conv(in_channels= emb_dim,out_channels=num_channels*(patch_size**2),kernel=())
+        self.unpatch_proj = m.MP_Conv(in_channels= emb_dim,out_channels=in_channels*(patch_size**2),kernel=())
         self.unpatch = nn.PixelShuffle(upscale_factor=patch_size)
 
     def forward(self,
                 x       : torch.Tensor,
                 time_emb: torch.Tensor = None,
-                text_emb: Optional[torch.Tensor] = None)->torch.Tensor:
+                text_emb: Optional[torch.Tensor] = None
+                )->torch.Tensor:
+        """
+        Forward pass of the ViT Expert.
 
+        Args:
+            x (torch.Tensor): Input image/latent tensor. Shape (Batch, In_Channels, H, W).
+            time_emb (torch.Tensor, optional): Time embedding vector. Shape (Batch, Time_Dim).
+            text_emb (torch.Tensor, optional): Text embedding vector. Shape (Batch, Text_Dim). or shape (Batch, seq_ln, Text_dim)
+
+        Returns:
+            torch.Tensor: Output tensor (e.g., predicted noise). Shape (Batch, In_Channels, H, W).
+        """
         x = self.patch(x)
-        batch, ch, h, w = x.shape
-        assert h * w == self.seq_ln, f"Sequence length mismatch: Got {h * w}, expected {self.seq_ln}"
+        batch,c,h_patch,w_patch = x.shape
+        assert h_patch*w_patch == self.seq_ln, f"Sequence length mismatch: Got {h_patch * w_patch}, expected {self.seq_ln}, shape: {x.shape}"
         x = x.flatten(2).transpose(1, 2)
         x += self.pos_emb
         if text_emb is not None:
             if self.map_txt is not None:
+                #shape transforms to -> (batch, text_emb_size) for the linear layer if ndims = 3
+                if text_emb.ndim == 3:
+                    text_emb = text_emb.mean(dim = 1)
+
                 text_emb = self.map_txt(text_emb)
 
             time_emb = m.mp_sum(a=time_emb, b=text_emb, t=self.emb_balance)
@@ -562,9 +686,6 @@ class Vit_expert(nn.Module):
 
         c_expanded = x.shape[-1]
         x = x.reshape(batch, self.seq_ln, c_expanded)
-        x = x.transpose(1, 2).view(batch, c_expanded, h, w)
+        x = x.transpose(1, 2).view(batch, c_expanded, h_patch,w_patch)
         x = self.unpatch(x)
         return x
-
-
-

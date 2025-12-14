@@ -128,18 +128,53 @@ def resample(x, f:Optional[list] = (1, 1), mode: Optional[str]='keep'):
 
 #magnitude preserving fourier features as in EDM2 paper
 class MP_Fourier(nn.Module):
+    """
+    Magnitude-Preserving Fourier Feature Mapping.
+
+    This module maps low-dimensional scalar inputs (like noise levels sigma or timesteps t)
+    into high-dimensional embedding vectors using random Fourier features.
+
+    It implements the mapping:
+        y = sqrt(2) * cos(2 * pi * (x * frequencies + phases))
+
+    This projection allows (MLPs) to learn high-frequency
+    functions in low-dimensional domains (e.g., learning the noise schedule).
+    The sqrt(2) factor ensures the output preserves unit variance (Magnitude Preserving),
+    assuming the input and weights are properly distributed.
+    """
     def __init__(self,num_channels: int, bandwidth: float = 1 ):
+        """
+        Args:
+            num_channels (int): The dimension of the output embedding vector.
+                                Effectively the number of random frequencies sampled.
+            bandwidth (float):  Controls the spread (standard deviation) of the random frequencies.
+                                - Higher bandwidth = Higher frequency components (better for fine details).
+                                - Lower bandwidth = Lower frequency components (smoother functions).
+                                Default is 1.0.
+        """
         super().__init__()
         self.register_buffer('freqs', 2 * torch.pi * torch.randn(num_channels) * bandwidth)
         self.register_buffer('phases', 2 * torch.pi * torch.rand(num_channels))
-
     def forward(self,x: torch.Tensor)-> torch.Tensor:
+        """
+        Performs the Fourier mapping using an outer product.
+
+        Args:
+            x (torch.Tensor): Input scalar values (e.g., noise levels).
+                              **Expected Shape:** (Batch_Size,) -> strictly 1D tensor.
+                              Note: This cannot be (Batch_Size, 1).
+
+        Returns:
+            torch.Tensor: High-dimensional embedding vectors.
+                          **Output Shape:** (Batch_Size, Num_Channels).
+        """
         y = x.to(torch.float32)
         y = y.ger(self.freqs.to(torch.float32))
         y = y + self.phases.to(torch.float32)
         y = y.cos() * np.sqrt(2)
         return y.to(x.dtype)
 
+#not used right now but can be applied later
 class Pos_encoding(nn.Module):
     def __init__(self,
                  emb_dim:Optional[int] = 512,
@@ -305,6 +340,7 @@ class MP_Attention(nn.Module):
         """
         res = query
         batch_size,seq_len,emb_dim =query.shape
+        assert emb_dim == self.emb_dim
         context = query if context is None else context
 
         #emb_size = channels > because we need a different filter for each emb_size vector (the image)

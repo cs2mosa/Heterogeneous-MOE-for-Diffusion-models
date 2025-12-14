@@ -22,7 +22,7 @@ class TestVitExpert(unittest.TestCase):
         self.TimeDim = 64
 
         self.model = m.Vit_expert(
-            num_heads=4, num_groups=4, num_channels=self.C,
+            num_heads=4, num_groups=4, in_channels=self.C,
             seq_ln=self.SeqLen, emb_dim=self.EmbDim, num_blocks=2,
             patch_size=self.Patch, time_dim=self.TimeDim, text_dim=self.TimeDim
         ).to(self.device)
@@ -80,7 +80,7 @@ class TestVitExpert(unittest.TestCase):
             seq_len = h_latent ** 2
 
             m_patch = m.Vit_expert(
-                num_heads=4, num_groups=4, num_channels=self.C,
+                num_heads=4, num_groups=4, in_channels=self.C,
                 seq_ln=seq_len, emb_dim=32, num_blocks=1,
                 patch_size=p, time_dim=32
             ).to(self.device)
@@ -104,7 +104,7 @@ class TestVitExpert(unittest.TestCase):
         time_dim = 64
 
         m_proj = m.Vit_expert(
-            num_heads=4, num_groups=4, num_channels=self.C,
+            num_heads=4, num_groups=4, in_channels=self.C,
             seq_ln=self.SeqLen, emb_dim=64, num_blocks=1,
             patch_size=2, time_dim=time_dim, text_dim=txt_dim
         ).to(self.device)
@@ -123,7 +123,7 @@ class TestVitExpert(unittest.TestCase):
         """Test 8: If balance=0.0 (All A), changing Text (B) should not affect output."""
         # Initialize with 0.0 balance (Pure Time, No Text)
         m_bias = m.Vit_expert(
-            num_heads=4, num_groups=4, num_channels=self.C,
+            num_heads=4, num_groups=4, in_channels=self.C,
             seq_ln=self.SeqLen, emb_dim=64, num_blocks=1,
             patch_size=2, time_dim=32, text_dim=32,
             emb_balance=0.0  # 0.0 means 100% Time (A), 0% Text (B) in typical lerp
@@ -158,7 +158,7 @@ class TestVitExpert(unittest.TestCase):
     def test_10_large_depth_connectivity(self):
         """Test 10: Connectivity check for deeper networks (ensure loop logic holds)."""
         deep_model = m.Vit_expert(
-            num_heads=4, num_groups=4, num_channels=self.C,
+            num_heads=4, num_groups=4, in_channels=self.C,
             seq_ln=self.SeqLen, emb_dim=64, num_blocks=5,  # 5 Blocks
             patch_size=2, time_dim=32
         ).to(self.device)
