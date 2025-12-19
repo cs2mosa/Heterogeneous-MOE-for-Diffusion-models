@@ -50,7 +50,7 @@ class TestPreconditionedHDMOEM(unittest.TestCase):
 
         x = torch.randn(self.batch_size, self.in_channels, self.img_res, self.img_res)
         sigma = torch.rand(self.batch_size)  # (Batch,)
-        text_emb = torch.randn(self.batch_size, self.text_dim)  # (Batch, Dim)
+        text_emb = torch.randn(self.batch_size, 1,self.text_dim)  # (Batch, Dim)
 
         # Masks (Batch, Num_Experts)
         unet_mask = torch.ones(self.batch_size, self.num_experts)
@@ -76,7 +76,7 @@ class TestPreconditionedHDMOEM(unittest.TestCase):
 
         x = torch.randn(self.batch_size, self.in_channels, self.img_res, self.img_res)
         sigma = torch.rand(self.batch_size)
-        text_emb = torch.randn(self.batch_size, self.text_dim)
+        text_emb = torch.randn(self.batch_size, 1,self.text_dim)
         unet_mask = torch.ones(self.batch_size, self.num_experts)
         vit_mask = torch.ones(self.batch_size, self.num_experts)
 
@@ -119,7 +119,7 @@ class TestPreconditionedHDMOEM(unittest.TestCase):
 
         x = torch.randn(self.batch_size, self.in_channels, self.img_res, self.img_res, requires_grad=True)
         sigma = torch.rand(self.batch_size, requires_grad=True)
-        text_emb = torch.randn(self.batch_size, self.text_dim)
+        text_emb = torch.randn(self.batch_size, 1,self.text_dim)
         unet_mask = torch.ones(self.batch_size, self.num_experts)
         vit_mask = torch.ones(self.batch_size, self.num_experts)
 
@@ -135,7 +135,7 @@ class TestPreconditionedHDMOEM(unittest.TestCase):
 
         # Check if internal parameters have grads (e.g., Fourier layers)
         has_grad = False
-        for param in model.parameters():
+        for param in model.parameters(recurse=True):
             if param.grad is not None:
                 has_grad = True
                 break
@@ -150,7 +150,7 @@ class TestPreconditionedHDMOEM(unittest.TestCase):
 
         x = torch.randn(self.batch_size, self.in_channels, self.img_res, self.img_res)
         sigma = torch.rand(self.batch_size)
-        text_emb = torch.randn(self.batch_size, self.text_dim)
+        text_emb = torch.randn(self.batch_size, 1,self.text_dim)
 
         # Only activate the first expert
         unet_mask = torch.zeros(self.batch_size, self.num_experts)
@@ -174,7 +174,7 @@ class TestPreconditionedHDMOEM(unittest.TestCase):
 
         x = torch.randn(self.batch_size, self.in_channels, self.img_res, self.img_res)
         sigma = torch.rand(self.batch_size)
-        text_emb = torch.randn(self.batch_size, self.text_dim)
+        text_emb = torch.randn(self.batch_size, 1,self.text_dim)
 
         # All experts inactive
         unet_mask = torch.zeros(self.batch_size, self.num_experts)
@@ -205,7 +205,7 @@ class TestPreconditionedHDMOEM(unittest.TestCase):
 
         x = torch.randn(self.batch_size, self.in_channels, self.img_res, self.img_res).to(device)
         sigma = torch.rand(self.batch_size).to(device)
-        text_emb = torch.randn(self.batch_size, self.text_dim).to(device)
+        text_emb = torch.randn(self.batch_size, 1, self.text_dim).to(device)
         unet_mask = torch.ones(self.batch_size, self.num_experts).to(device)
         vit_mask = torch.ones(self.batch_size, self.num_experts).to(device)
 
@@ -222,7 +222,7 @@ class TestPreconditionedHDMOEM(unittest.TestCase):
 
 
         x = torch.randn(2, self.in_channels, self.img_res, self.img_res)
-        text_emb = torch.randn(2, self.text_dim)
+        text_emb = torch.randn(self.batch_size, 1,self.text_dim)
         unet_mask = torch.ones(2, self.num_experts)
         vit_mask = torch.ones(2, self.num_experts)
 

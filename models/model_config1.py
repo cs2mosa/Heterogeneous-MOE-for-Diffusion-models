@@ -38,7 +38,38 @@ def router_to_unet_experts(x: torch.Tensor,
 
 #adding gating MLP network after the attention module with 2 units output and softmax activation -> linear interpolation with the 2 units across the out_unet and Out_VIT
 class HDMOEM (nn.Module):
+    """
+    Hybrid Diffusion Mixture of Experts Model (HDMOEM).
 
+    This architecture integrates a U-Net path and a Vision Transformer (ViT) path,
+    both utilizing Sparse Mixture of Experts (MoE) routing. The model processes
+    noisy inputs through both paths in parallel, fuses them via Cross-Attention
+    (where U-Net features query ViT features), and applies a final learned gating
+    mechanism to produce the output.
+
+    Key Features:
+    1. **Dual Routing**: Independent routers for U-Net (local/spatial) and ViT (global/semantic) experts.
+    2. **Adaptive Scaling**: A `scaling_net` modulates the input magnitude for both paths based on noise level.
+    3. **Hybrid Fusion**: U-Net experts provide structural details, while ViT experts provide
+       global context. These are fused via Magnitude-Preserving Cross-Attention.
+    4. **Soft Gating**: A final MLP blends the pure U-Net output with the Attended output.
+
+    Attributes:
+        scaling_net (Scaling_router): Determines contribution weights for U-Net vs ViT inputs based on time.
+        Unet_router (Router): Sparse Top-K router for U-Net experts.
+        vit_router (Router): Sparse Top-K router for ViT experts.
+        Unet_experts (nn.ModuleList): Collection of `Unet_expert` modules.
+        VIT_experts (nn.ModuleList): Collection of `Vit_expert` modules.
+        cross_attn (MP_Attention): Fuses U-Net features (Query) and ViT features (Context).
+
+    forward argument shapes:
+        x (torch.Tensor) -> Shape: (Batch, In_Channels, Height, Width).
+        time_vec (torch.Tensor) -> Shape: (Batch,).
+        text_emb (torch.Tensor) -> Shape: (Batch, Seq_Len, Text_Emb_Dim) -> 3D Tensor.
+        Unet_router_mask (torch.Tensor) -> Shape: (Batch, Num_Experts).
+        Vit_router_mask (torch.Tensor)-> Shape: (Batch, Num_Experts).
+        zeta (float): Exploration noise magnitude for the Router logits.
+    """
     def __init__(self,
                  IN_in_channels       : int,  # in_channels == Out_channels in VIT experts and Unet experts
                  IN_img_resolution    : int,  # seq_ln  = img_res ** 2
@@ -108,6 +139,7 @@ class HDMOEM (nn.Module):
                                     top_k=top_k,
                                     num_experts= num_experts)
 
+        self.alpha_txt = nn.Parameter(torch.tensor(0.0))
         self.Unet_experts= nn.ModuleList()
         for i in range(num_experts):
             self.Unet_experts.append(m.Unet_expert(img_resolution= IN_img_resolution,
@@ -142,6 +174,15 @@ class HDMOEM (nn.Module):
                                                   attn_balance= 0.8,
                                                   is_cross_attn= True)
 
+        self.cross_attn_text = util.MP_Attention(
+            num_heads=VIT_num_heads,
+            emb_dim=IN_in_channels,
+            seq_ln=IN_img_resolution ** 2,
+            context_dim=text_emb_dim,
+            attn_balance=0.5,
+            is_cross_attn=True
+        )
+
         self.gate1 = util.MP_Conv(in_channels= IN_in_channels * 2,
                                   out_channels=IN_in_channels ,
                                   kernel=(1,1)
@@ -159,7 +200,27 @@ class HDMOEM (nn.Module):
                 Vit_router_mask : torch.Tensor, #shape-> (batch,num_experts)
                 zeta            : float
                 )-> tuple[torch.Tensor,torch.Tensor,torch.Tensor]:
+        """
+        Forward pass of the Hybrid MoE.
 
+        Args:
+            :param x : Input noisy image/latent.
+                              Shape: (Batch, In_Channels, Height, Width).
+            :param time_vec: Raw time steps or noise levels (sigma).
+                                     Shape: (Batch,).
+            :param text_emb : Conditional text embeddings.
+                                     Shape: (Batch, Seq_Len, Text_Emb_Dim) -> 3D Tensor.
+            :param Unet_router_mask : Binary mask to disable specific U-Net experts.
+                                             Shape: (Batch, Num_Experts).
+            :param Vit_router_mask : Binary mask to disable specific ViT experts.
+                                            Shape: (Batch, Num_Experts).
+            :param zeta : Exploration noise magnitude for the Router logits.
+
+        :returns tuple:
+                - out_gated_attn (torch.Tensor): Final denoised output. Shape: (Batch, C, H, W).
+                - Unet_gate_probs (torch.Tensor): Softmax probabilities from U-Net router. Shape: (Batch, Experts).
+                - Vit_gate_probs (torch.Tensor): Softmax probabilities from ViT router. Shape: (Batch, Experts).
+        """
         B,C,H,W = x.shape
         time_embed = self.Fourier_emb(x = time_vec)
         time_embed = self.out_fourier1(x = time_embed)
@@ -201,7 +262,15 @@ class HDMOEM (nn.Module):
                                           gain_t = 1.0,
                                          )
 
-        out_final_attn_img = out_final_attn.transpose(1, 2).view(B,C,H,W)
+        final_feats = self.cross_attn_text(
+            query=out_final_attn,
+            context=text_emb,
+            gain_s=1.0, gain_t=1.0
+        )
+
+        final_feats = out_final_attn + self.alpha_txt * (final_feats - out_final_attn)
+
+        out_final_attn_img = final_feats.transpose(1, 2).view(B,C,H,W)
         in_gate = util.mp_cat(out_Unet_expert,out_final_attn_img,dim = 1)
         out_gate = self.gate1(in_gate)
         out_gate = self.gate2(util.mp_silu(out_gate))
@@ -209,11 +278,36 @@ class HDMOEM (nn.Module):
         Wx = out_gate[:,0:1]
         Wa = out_gate[:,1:2]
         out_gated_attn = Wx * out_Unet_expert + Wa *  out_final_attn_img
+        out = util.mp_sum(out_Unet_expert, out_gated_attn, t=0.5)
 
-        return out_gated_attn, Unet_gate_probs, Vit_gate_probs
+        return out, Unet_gate_probs, Vit_gate_probs
 
 
 class preconditioned_HDMOEM(nn.Module):
+    """
+    EDM Preconditioning Wrapper for the HDMOEM.
+
+    This class implements the "Elucidated Diffusion Models" (Karras et al.) preconditioning
+    framework. It handles input scaling c_in, noise embedding c_noise,
+    skip scaling c_skip, and output scaling c_out to ensure the neural network
+    predicts the denoised signal D_X with unit variance targets.
+
+    It optionally learns a log-variance parameter for improved likelihood estimation.
+
+    Attributes:
+        net (HDMOEM): The core denoising backbone.
+        sigma_data (float): Expected standard deviation of the training data (usually 0.5).
+        log_var_fourier (MP_Fourier): Fourier features for the learnable variance prediction.
+        log_var_linear (MP_Conv): Projection for the learnable variance.
+
+    forward argument shapes:
+        x (torch.Tensor) -> Shape: (Batch, In_Channels, Height, Width).
+        time_vec (torch.Tensor) -> Shape: (Batch,).
+        text_emb (torch.Tensor) -> Shape: (Batch, Seq_Len, Text_Emb_Dim) for text conditioned generation. or (Batch, Text_Emb_Dim) for class conditioned generation.
+        Unet_router_mask (torch.Tensor) -> Shape: (Batch, Num_Experts).
+        Vit_router_mask (torch.Tensor)-> Shape: (Batch, Num_Experts).
+        zeta (float): Exploration noise magnitude for the Router logits.
+    """
     def __init__(self,
                  IN_in_channels: int,  # in_channels == Out_channels in VIT experts and Unet experts
                  IN_img_resolution: int,  # seq_ln  = img_res ** 2
@@ -237,6 +331,12 @@ class preconditioned_HDMOEM(nn.Module):
                  sigma_data: Optional[float] = 0.5, #expected standard deviation of the data
                  log_var_channels: Optional[int] = 128
                  ):
+        """
+        Args:
+            ... (Same args as HDMOEM) ...
+            sigma_data (float, optional): The standard deviation of the dataset (EDM hyperparam). Defaults to 0.5.
+            log_var_channels (int, optional): Hidden dimension for the variance prediction network. Defaults to 128.
+        """
         super().__init__()
         self.sigma_data = sigma_data
         self.log_var_channels = log_var_channels
@@ -272,7 +372,34 @@ class preconditioned_HDMOEM(nn.Module):
                 zeta: float,
                 return_log_var:bool = False
                 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor] | None]:
+        """
+        Forward pass with EDM Preconditioning.
 
+        Calculates: C_NOISE, C_IN, C_OUT,C_SKIP given the standard deviation of the data and the noise conditioning vector
+
+        Args:
+            x : Input noisy image/latent.
+                              Shape: (Batch, In_Channels, Height, Width).
+            sigma: Raw time steps or noise levels.
+                                     Shape: (Batch,).
+            text_emb : Conditional text embeddings.
+                                     Shape: (Batch, Seq_Len, Text_Emb_Dim) for text conditioned generation. or (Batch, Text_Emb_Dim) for class conditioned generation
+            Unet_router_mask : Binary mask to disable specific U-Net experts.
+                                             Shape: (Batch, Num_Experts).
+            Vit_router_mask : Binary mask to disable specific ViT experts.
+                                            Shape: (Batch, Num_Experts).
+            zeta : Exploration noise magnitude for the Router logits.
+
+            return_log_var : If True, returns the learned log variance
+                                             for likelihood weighting. Defaults to False.
+
+        Returns:
+            tuple of :
+                - D_x (torch.Tensor): The estimated clean data (denoised). Shape: (Batch, C, H, W).
+                - Unet_gate_probs (torch.Tensor): Load balancing probabilities for U-Net.
+                - Vit_gate_probs (torch.Tensor): Load balancing probabilities for ViT.
+                - log_var (torch.Tensor | None): Learned log-variance (if requested).
+        """
         # Preconditioning weights.
         sigma = sigma.to(torch.float32).reshape(-1, 1, 1, 1)
         c_skip = self.sigma_data ** 2 / (sigma ** 2 + self.sigma_data ** 2)
