@@ -120,7 +120,7 @@ class Router(nn.Module):
                 time_emb :torch.Tensor,
                 mask     : Optional[torch.Tensor] = None,
                 zeta     : Optional[float] = 1e-2
-                )->tuple[torch.Tensor, torch.Tensor]:
+                )->tuple[torch.Tensor, torch.Tensor,torch.Tensor]:
         """
         Args:
             x (torch.Tensor): Input tensor. (typically an image vector shaped as a 4d tensor)
@@ -165,7 +165,7 @@ class Router(nn.Module):
         gating_weights = F.softmax(topk_vals,dim = -1)
         #sparse representation of the gate weights-> placing the new gate weights in their place of the same dimensions as the linear layer output
         sparse_gate_weights = torch.zeros_like(x).scatter(-1, topk_indices, gating_weights)
-        return sparse_gate_weights, gate_probs
+        return sparse_gate_weights, gate_probs,x
 
 
 class Unet_block(nn.Module):

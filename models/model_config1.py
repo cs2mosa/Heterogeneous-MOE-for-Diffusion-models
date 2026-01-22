@@ -199,7 +199,7 @@ class HDMOEM (nn.Module):
                 Unet_router_mask: torch.Tensor, #shape-> (batch,num_experts)
                 Vit_router_mask : torch.Tensor, #shape-> (batch,num_experts)
                 zeta            : float
-                )-> tuple[torch.Tensor,torch.Tensor,torch.Tensor]:
+                )-> tuple[torch.Tensor,torch.Tensor,torch.Tensor,torch.Tensor,torch.Tensor,torch.Tensor]:
         """
         Forward pass of the Hybrid MoE.
 
@@ -230,12 +230,12 @@ class HDMOEM (nn.Module):
         scaling_Unet = scaling_factors[:,1:2].view(-1, 1, 1, 1)
         in_unet_router = scaling_Unet * x
         in_vit_router = scaling_vit * x
-        out_vit_router,Vit_gate_probs = self.vit_router(x = in_vit_router,
+        out_vit_router,Vit_gate_probs,vit_raw = self.vit_router(x = in_vit_router,
                                          time_emb = time_embed,
                                          zeta= zeta,
                                          mask = Vit_router_mask)
 
-        out_unet_router,Unet_gate_probs = self.Unet_router(x = in_unet_router,
+        out_unet_router,Unet_gate_probs,Unet_raw = self.Unet_router(x = in_unet_router,
                                            time_emb = time_embed,
                                            zeta = zeta,
                                            mask = Unet_router_mask)
@@ -280,7 +280,7 @@ class HDMOEM (nn.Module):
         out_gated_attn = Wx * out_Unet_expert + Wa *  out_final_attn_img
         out = util.mp_sum(out_Unet_expert, out_gated_attn, t=0.5)
 
-        return out, Unet_gate_probs, Vit_gate_probs
+        return out, Unet_gate_probs, Unet_raw, Vit_gate_probs, vit_raw,scaling_factors
 
 
 class preconditioned_HDMOEM(nn.Module):
@@ -365,13 +365,13 @@ class preconditioned_HDMOEM(nn.Module):
 
     def forward(self,
                 x: torch.Tensor,  # shape -> (batch,in_channels,height, width)
-                sigma: torch.Tensor,  # sigma in literature shape ->(batch,)
+                sigma: torch.Tensor,  # sigma in literature shape ->(batch,1,1,1)
                 text_emb: torch.Tensor,  # shape -> (batch,text_seq_ln,text_emb_dim)
                 Unet_router_mask: torch.Tensor,  # shape-> (batch,num_experts)
                 Vit_router_mask: torch.Tensor,  # shape-> (batch,num_experts)
                 zeta: float,
                 return_log_var:bool = False
-                ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor] | None]:
+                ) -> dict[str,torch.Tensor]:
         """
         Forward pass with EDM Preconditioning.
 
@@ -401,13 +401,13 @@ class preconditioned_HDMOEM(nn.Module):
                 - log_var (torch.Tensor | None): Learned log-variance (if requested).
         """
         # Preconditioning weights.
-        sigma = sigma.to(torch.float32).reshape(-1, 1, 1, 1)
+        sigma = sigma.to(torch.float32)
         c_skip = self.sigma_data ** 2 / (sigma ** 2 + self.sigma_data ** 2)
         c_out =  sigma * self.sigma_data / (sigma ** 2 + self.sigma_data ** 2).sqrt()
         c_in = 1 / (self.sigma_data ** 2 + sigma ** 2).sqrt()
         c_noise = sigma.flatten().log() / 4
         x = x * c_in
-        out_net,Unet_gate_probs, Vit_gate_probs = self.net(x = x,
+        out_net,Unet_gate_probs,Unet_raw, Vit_gate_probs,vit_raw ,scaling_factors= self.net(x = x,
                            text_emb = text_emb,
                            time_vec = c_noise ,
                            Unet_router_mask = Unet_router_mask,
@@ -416,6 +416,18 @@ class preconditioned_HDMOEM(nn.Module):
         D_x = c_skip * x + c_out* out_net
         if return_log_var:
             log_var = self.log_var_linear(self.log_var_fourier(c_noise)).reshape(-1, 1, 1, 1)
-            return D_x, Unet_gate_probs, Vit_gate_probs, log_var
+            return {"denoised":D_x,
+                    "Unet_router_loss":Unet_gate_probs,
+                    "Unet_raw" :Unet_raw,
+                    "vit_router_loss": Vit_gate_probs,
+                    "vit_raw":vit_raw,
+                    "scaling_net_out": scaling_factors,
+                    "log_var":log_var}
         else:
-            return D_x, Unet_gate_probs, Vit_gate_probs, None
+            return {"denoised":D_x,
+                    "Unet_router_loss":Unet_gate_probs,
+                    "Unet_raw" :Unet_raw,
+                    "vit_router_loss": Vit_gate_probs,
+                    "vit_raw":vit_raw,
+                    "scaling_net_out": scaling_factors,
+                    "log_var":None}
