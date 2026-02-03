@@ -6,7 +6,6 @@ from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 import os
 from VAE_CLIP import StabilityVAE ,CLIP_EMBED
-import json
 from configs import model_configs,mask_configs,zeta_configs,loss_configs,optim_configs
 from graphs.logger import Logger
 
@@ -21,7 +20,7 @@ def training_HDMOE(model_config: dict[str,Any],
     data_iter = iter(dataloader)
     logger = Logger(
         log_dir="./logs",
-        run_name="hdmoem_cifar10_v1",
+        run_name="hdmoem_flower102_v1",
         log_interval=10  # Log every 10 steps
     )
     vae = StabilityVAE(batch_size=model_config["batch_size"])
@@ -158,7 +157,7 @@ def training_HDMOE(model_config: dict[str,Any],
             step=step,
             loss_dict=loss,
             zeta=cur_zeta,
-            log_var=out_model['log_var'].mean(),
+            log_var=out_model['log_var'].mean().item() if out_model["log_var"] is not None else 0.0,
             lr=optimizer.param_groups[0]['lr'],
             sigma=sigma
         )
@@ -172,21 +171,19 @@ def training_HDMOE(model_config: dict[str,Any],
         )
 
         # Log scaling and gating
-        gate_weights = model.out_gate  # You'll need to expose this
         logger.log_scaling_gating(
             step=step,
             scaling_factors=out_model["scaling_net_out"],
-            gate_weights=gate_weights,
+            gate_weights=out_model["out_gate"],
             sigma=sigma
         )
 
         optimizer.zero_grad()
         loss["loss"].backward()
+        # loggers
+        logger.log_gradients(step=step, model=model.net)
+        logger.log_weight_statistics(step=step, model=model.net)
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        #loggers
-        logger.log_gradients(step=step, model=model)
-        logger.log_weight_statistics(step=step, model=model)
-
         optimizer.step()
         scheduler.step()
         current_mse = loss["denoising"].item()
@@ -263,34 +260,6 @@ def save_checkpoint(model,
     }
     torch.save(checkpoint, str(full_path))
     print(f"   [Save] Checkpoint saved: {full_path}")
-
-#will be saved in utils.py
-def log_step_json(filepath,
-                  step,
-                  loss_dict,
-                  zeta,
-                  log_var,
-                  lr
-                  ):
-    """
-    Appends a single step's data as a JSON object to the file.
-    """
-    record = {
-        "step": step,
-        "zeta": round(float(zeta), 6),
-        "log_var": round(float(log_var), 6),
-        # Main Losses
-        "total_loss": round(loss_dict["loss"].item(), 6),
-        "raw_mse": round(loss_dict["denoising"].item(), 6), # Or 'raw_mse' if you updated the class
-        # Aux Losses (Use .get() in case you disable them later)
-        "balance_loss": round(loss_dict["balance"].item(), 6),
-        "z_loss": round(loss_dict["z_loss"].item(), 6),
-        "entropy_loss": round(loss_dict["entropy"].item(), 6),
-        "edm_loss": round(loss_dict["pure_loss"].item(),6),
-        "lr":round(lr,6)
-    }
-    with open(filepath, "a") as f:
-        f.write(json.dumps(record) + "\n")
 
 if __name__ == '__main__':
     training_HDMOE(model_configs,

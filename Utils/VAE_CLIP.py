@@ -101,7 +101,7 @@ class CLIP_EMBED:
         """Lazy initialization to be called on first use."""
         if self.tokenizer is None:
             self.tokenizer = CLIPTokenizer.from_pretrained(self.embed_name)
-            self.text_encoder = CLIPTextModel.from_pretrained(self.embed_name).to(self.device)
+            self.text_encoder = CLIPTextModel.from_pretrained(self.embed_name,ignore_mismatched_sizes=True).to(self.device)
             self.text_encoder.requires_grad_(False)
             self.text_encoder.eval()
 

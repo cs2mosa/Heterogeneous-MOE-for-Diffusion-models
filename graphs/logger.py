@@ -256,53 +256,66 @@ class Logger:
                     record[f"{name}_grad_norm"] = grad_norm
         
         self._write_jsonl(self.gradient_log_file, record)
-    
-    def log_weight_statistics(self,
-                             step: int,
-                             model,
-                             component_names: Optional[List[str]] = None,
-                             percentiles: List[float] = (0.1, 0.5, 0.9)):
+
+    def log_weight_statistics(self, step: int, model: torch.nn.Module):
         """
-        Log weight statistics (mean, std, max, percentiles).
-        
-        Args:
-            step: Current training step
-            model: The model
-            component_names: Components to track
-            percentiles: Percentiles to track (e.g., [0.1, 0.5, 0.9])
+        Logs weight statistics (Mean, Std, Min, Max).
+        FIXED: Removed torch.quantile and torch.cat to prevent RuntimeError on large models.
         """
-        if step % (self.log_interval * 10) != 0:  # Log less frequently
+        # Log much less frequently (e.g., every 50th log interval)
+        if step % (self.log_interval * 50) != 0:
             return
-        
-        if component_names is None:
-            component_names = ['Unet_experts', 'VIT_experts']
-        
+
+        component_names = ['Unet_experts', 'VIT_experts']
         record = {"step": step}
-        
+
         with torch.no_grad():
             for name in component_names:
                 if hasattr(model, name):
                     component = getattr(model, name)
-                    
-                    # Collect all weights
-                    weights = []
+
+                    # Accumulators for iterative calculation
+                    total_sum = 0.0
+                    total_sq_sum = 0.0  # Sum of squares for Std Dev
+                    total_count = 0
+                    max_val = -float('inf')
+                    min_val = float('inf')
+
+                    found_weights = False
+
+                    # Iterate over parameters one by one (Memory Safe)
                     for param in component.parameters():
-                        if param.requires_grad and param.ndim > 1:  # Skip biases
-                            weights.append(param.abs().flatten())
-                    
-                    if len(weights) > 0:
-                        all_weights = torch.cat(weights)
-                        
-                        record[f"{name}_weight_mean"] = all_weights.mean().item()
-                        record[f"{name}_weight_std"] = all_weights.std().item()
-                        record[f"{name}_weight_max"] = all_weights.max().item()
-                        record[f"{name}_weight_min"] = all_weights.min().item()
-                        
-                        # Percentiles
-                        for p in percentiles:
-                            pval = torch.quantile(all_weights, p)
-                            record[f"{name}_weight_p{int(p*100)}"] = pval.item()
-        
+                        if param.requires_grad and param.ndim > 1:
+                            found_weights = True
+
+                            # Get min/max of this specific tensor
+                            p_min = param.min().item()
+                            p_max = param.max().item()
+
+                            # Update global min/max
+                            if p_max > max_val: max_val = p_max
+                            if p_min < min_val: min_val = p_min
+
+                            # Update sums for Mean/Std
+                            total_sum += param.sum().item()
+                            total_sq_sum += param.pow(2).sum().item()
+                            total_count += param.numel()
+
+                    if found_weights and total_count > 0:
+                        # Calculate statistics from accumulators
+                        mean = total_sum / total_count
+
+                        # Variance = E[X^2] - (E[X])^2
+                        var = (total_sq_sum / total_count) - (mean ** 2)
+                        std = np.sqrt(max(0, var))  # Clamp to 0 to avoid fp errors
+
+                        record[f"{name}_weight_mean"] = round(mean, 6)
+                        record[f"{name}_weight_std"] = round(std, 6)
+                        record[f"{name}_weight_max"] = round(max_val, 6)
+                        record[f"{name}_weight_min"] = round(min_val, 6)
+                    else:
+                        record[f"{name}_weight_mean"] = None
+
         self._write_jsonl(self.weight_log_file, record)
     
     def _flush_training_log(self):
@@ -339,95 +352,3 @@ class Logger:
                 total_norm += param_norm.item() ** 2
         total_norm = total_norm ** 0.5
         return total_norm
-
-
-# =========================================================
-# USAGE EXAMPLE
-# =========================================================
-
-def example_usage():
-    """
-    Example of how to use EnhancedTrainingLogger in your training loop.
-    """
-    
-    # Initialize logger
-    logger = EnhancedTrainingLogger(
-        log_dir="./logs",
-        run_name="hdmoem_cifar10_v1",
-        log_interval=10  # Log every 10 steps
-    )
-    
-    # In your training loop:
-    for step in range(total_steps):
-        # ... forward pass ...
-        out, unet_probs, unet_raw, vit_probs, vit_raw, scaling_factors = model(
-            x=x_noisy,
-            time_vec=sigma,
-            text_emb=text_emb,
-            Unet_router_mask=unet_mask,
-            Vit_router_mask=vit_mask,
-            zeta=current_zeta
-        )
-        
-        # Compute losses
-        loss_dict = {
-            'loss': total_loss,
-            'denoising': denoising_loss,
-            'pure_loss': pure_edm_loss,
-            'balance': balance_loss,
-            'z_loss': z_loss_value,
-            'entropy': entropy_loss,
-        }
-        
-        # Log main training metrics
-        logger.log_training_step(
-            step=step,
-            loss_dict=loss_dict,
-            zeta=current_zeta,
-            log_var=predicted_log_var.mean(),
-            lr=optimizer.param_groups[0]['lr'],
-            sigma=sigma
-        )
-        
-        # Log router statistics
-        logger.log_router_statistics(
-            step=step,
-            unet_probs=unet_probs,
-            vit_probs=vit_probs,
-            sigma=sigma
-        )
-        
-        # Log scaling and gating
-        gate_weights = model.out_gate  # You'll need to expose this
-        logger.log_scaling_gating(
-            step=step,
-            scaling_factors=scaling_factors,
-            gate_weights=gate_weights,
-            sigma=sigma
-        )
-        
-        # ... backward pass ...
-        total_loss.backward()
-        
-        # Log gradients (after backward)
-        logger.log_gradients(step=step, model=model)
-        
-        # Log weight statistics (less frequently)
-        logger.log_weight_statistics(step=step, model=model)
-        
-        # ... optimizer step ...
-        optimizer.step()
-        optimizer.zero_grad()
-
-
-if __name__ == "__main__":
-    print("Enhanced Training Logger")
-    print("=" * 60)
-    print("\nThis logger tracks:")
-    print("  ✓ Core training losses (EDM, MSE, uncertainty)")
-    print("  ✓ MoE auxiliary losses (balance, z-loss, entropy)")
-    print("  ✓ Router statistics (usage, entropy, Gini, dead experts)")
-    print("  ✓ Scaling/gating behavior across noise levels")
-    print("  ✓ Gradient norms per component")
-    print("  ✓ Weight statistics (mean, std, percentiles)")
-    print("\nSee example_usage() for integration guide.")

@@ -215,12 +215,12 @@ class HDMOEM (nn.Module):
                 Vit_router_mask : torch.Tensor, #shape-> (batch,num_experts)
                 zeta            : float,
                 alpha_routing: float = 10
-                )-> tuple[torch.Tensor,torch.Tensor,torch.Tensor,torch.Tensor,torch.Tensor,torch.Tensor]:
+                )-> tuple[torch.Tensor,torch.Tensor,torch.Tensor,torch.Tensor,torch.Tensor,torch.Tensor,torch.Tensor]:
         """
         Forward pass of the Hybrid MoE.
 
         Args:
-            :param alpha_routing: for dynamic query\context swapping (we will test this logically)
+            :param alpha_routing: for dynamic query and context swapping (we will test this logically)
             :param x : Input noisy image/latent.
                               Shape: (Batch, In_Channels, Height, Width).
             :param time_vec: Raw time steps or noise levels (sigma).
@@ -306,7 +306,7 @@ class HDMOEM (nn.Module):
         out_gated_attn = Wx * out_Unet_expert + Wa *  out_final_attn_img
         out = util.mp_sum(out_Unet_expert, out_gated_attn, t=0.5)
         out = self.output_proj(out)
-        return out, Unet_gate_probs, Unet_raw, Vit_gate_probs, vit_raw,scaling_factors
+        return out, Unet_gate_probs, Unet_raw, Vit_gate_probs, vit_raw,scaling_factors,out_gate
 
 
 class preconditioned_HDMOEM(nn.Module):
@@ -440,7 +440,7 @@ class preconditioned_HDMOEM(nn.Module):
             c_noise = c_noise.expand(batch_size)
 
         x = x * c_in
-        out_net,Unet_gate_probs,Unet_raw, Vit_gate_probs,vit_raw ,scaling_factors= self.net(x = x,
+        out_net,Unet_gate_probs,Unet_raw, Vit_gate_probs,vit_raw ,scaling_factors,out_gate= self.net(x = x,
                            text_emb = text_emb,
                            time_vec = c_noise ,
                            Unet_router_mask = Unet_router_mask,
@@ -455,6 +455,7 @@ class preconditioned_HDMOEM(nn.Module):
                     "vit_router_loss": Vit_gate_probs,
                     "vit_raw":vit_raw,
                     "scaling_net_out": scaling_factors,
+                    "out_gate": out_gate,
                     "log_var":log_var}
         else:
             return {"denoised":D_x,
@@ -463,4 +464,5 @@ class preconditioned_HDMOEM(nn.Module):
                     "vit_router_loss": Vit_gate_probs,
                     "vit_raw":vit_raw,
                     "scaling_net_out": scaling_factors,
+                    "out_gate": out_gate,
                     "log_var":None}
