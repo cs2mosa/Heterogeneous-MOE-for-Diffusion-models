@@ -1,7 +1,7 @@
 import torch
 import unittest
 import math
-from models.Utilities import MaskGenerator
+from Utils.utils import MaskGenerator
 
 class TestCurriculumMask(unittest.TestCase):
     def setUp(self):
@@ -23,7 +23,7 @@ class TestCurriculumMask(unittest.TestCase):
     def test_1_shape(self):
         """Verify output shape is [Batch, Num_Experts]"""
         sigma = torch.tensor([1.0, 0.5, 80.0, 0.002])
-        mask = self.gen(sigma)
+        mask = self.gen(sigma,0)
         self.assertEqual(mask.shape, (4, 5))
         self.assertTrue(torch.all((mask == 0) | (mask == 1)))
 
@@ -36,7 +36,7 @@ class TestCurriculumMask(unittest.TestCase):
             bandwidth=0.0001  # Extremely narrow, should force safety valve
         )
         sigma = torch.randn(self.batch_size).exp()
-        mask = gen_safe(sigma)
+        mask = gen_safe(sigma,step= 0)
 
         active_counts = mask.sum(dim=-1)
         self.assertTrue(torch.all(active_counts >= min_active))
@@ -46,7 +46,7 @@ class TestCurriculumMask(unittest.TestCase):
         """Verify that VERY high noise activates the largest experts (Attr 11)"""
         # A sigma way above the distribution mean
         high_sigma = torch.tensor([500.0])
-        mask = self.gen(high_sigma)
+        mask = self.gen(high_sigma,step= 0)
 
         # Expert index 4 is Attr 11 (the largest)
         self.assertEqual(mask[0, 4].item(), 1.0)
@@ -57,7 +57,7 @@ class TestCurriculumMask(unittest.TestCase):
     def test_4_low_noise_specialization(self):
         """Verify that VERY low noise activates the smallest experts (Attr 3)"""
         low_sigma = torch.tensor([0.0001])
-        mask = self.gen(low_sigma)
+        mask = self.gen(low_sigma,step= 0)
 
         # Expert index 0 is Attr 3 (the smallest)
         self.assertEqual(mask[0, 0].item(), 1.0)
@@ -74,7 +74,7 @@ class TestCurriculumMask(unittest.TestCase):
 
         # We manually calculate where the mask should be centered
         # 0.5 percentile should be the middle of [0, 1] scales
-        mask = self.gen(median_sigma)
+        mask = self.gen(median_sigma,step= 0)
 
         # In attributes [3, 5, 7, 9, 11], 7 is exactly the center (0.5)
         # So expert index 2 (Attr 7) must be active
@@ -88,8 +88,8 @@ class TestCurriculumMask(unittest.TestCase):
         gen_narrow = MaskGenerator(self.expert_attrs, bandwidth=0.01)
         gen_wide = MaskGenerator(self.expert_attrs, bandwidth=0.8)
 
-        mask_n = gen_narrow(sigma)
-        mask_w = gen_wide(sigma)
+        mask_n = gen_narrow(sigma,step= 0)
+        mask_w = gen_wide(sigma,step= 0)
 
         self.assertGreater(mask_w.sum(), mask_n.sum())
         print(f"[Test 6] Bandwidth test: Wide ({mask_w.sum()}) > Narrow ({mask_n.sum()}).")
@@ -97,7 +97,7 @@ class TestCurriculumMask(unittest.TestCase):
     def test_7_no_grad(self):
         """Verify that the operation is truly non-differentiable (saves memory)"""
         sigma = torch.tensor([1.0], requires_grad=True)
-        mask = self.gen(sigma)
+        mask = self.gen(sigma,step= 0)
         self.assertFalse(mask.requires_grad)
 
 

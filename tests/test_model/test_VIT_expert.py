@@ -12,7 +12,7 @@ class TestVitExpert(unittest.TestCase):
         self.C = 4
         self.H = 32
         self.W = 32
-        self.Patch = 2
+        self.Patch = 6
 
         # Derived Config
         self.H_latent = self.H // self.Patch

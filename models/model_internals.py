@@ -220,7 +220,8 @@ class MP_Conv(nn.Module):
     def __init__(self,
                  in_channels: int,
                  out_channels: int,
-                 kernel: tuple
+                 kernel: tuple,
+                 stride: int = 1
                  ):
         """
         Args:
@@ -234,6 +235,7 @@ class MP_Conv(nn.Module):
         self.weights = nn.Parameter(torch.randn(out_channels,in_channels,*kernel))
         assert self.weights.numel() != 0
         self.kernel = kernel
+        self.stride = stride
 
     def forward(self,x: torch.Tensor, gain: float= 1.0)-> torch.Tensor:
         """
@@ -259,7 +261,18 @@ class MP_Conv(nn.Module):
         if x.ndim == 2 :
             return F.linear(x,w)
         assert x.ndim == 4
-        return F.conv2d(x,w,padding = (w.shape[-1]//2,))
+        k = w.shape[-1]  # kernel size (assuming square)
+
+        if self.stride == 1:
+            # 'same' padding for stride=1
+            total_pad = k - 1
+            pad = total_pad // 2
+            x = F.pad(x, (pad, total_pad - pad, pad, total_pad - pad))
+            return F.conv2d(x, w, padding=0, stride=1)
+        else:
+            # Standard padding for stride>1
+            # Use floor(k/2) which works for both odd and even
+            return F.conv2d(x, w, padding=k // 2, stride=self.stride)
 
 #magnitude preserving attention (single and multi_head) layer as in EDM2 paper
 #note: we will try to use gated attention mechanism for FUSING the output of the 2 main paths

@@ -662,6 +662,17 @@ class Vit_expert(nn.Module):
         Returns:
             torch.Tensor: Output tensor (e.g., predicted noise). Shape (Batch, In_Channels, H, W).
         """
+        # Store original dimensions
+        batch, in_channels, orig_h, orig_w = x.shape
+        patch_size = self.patch.kernel_size[0]
+
+        # Calculate and apply padding
+        pad_h = (patch_size - orig_h % patch_size) % patch_size
+        pad_w = (patch_size - orig_w % patch_size) % patch_size
+
+        if pad_h > 0 or pad_w > 0:
+            x = F.pad(x, (0, pad_w, 0, pad_h), mode='constant', value=0)
+
         x = self.patch(x)
         batch,c,h_patch,w_patch = x.shape
         assert h_patch*w_patch == self.seq_ln, f"Sequence length mismatch: Got {h_patch * w_patch}, expected {self.seq_ln}, shape: {x.shape}"
@@ -688,4 +699,8 @@ class Vit_expert(nn.Module):
         x = x.reshape(batch, self.seq_ln, c_expanded)
         x = x.transpose(1, 2).view(batch, c_expanded, h_patch,w_patch)
         x = self.unpatch(x)
+        # Crop back to original size
+        if pad_h > 0 or pad_w > 0:
+            x = x[:, :, :orig_h, :orig_w]
+
         return x

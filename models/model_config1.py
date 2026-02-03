@@ -1,3 +1,5 @@
+import math
+
 import torch
 import torch.nn as nn
 from models import model_internals as util
@@ -72,7 +74,8 @@ class HDMOEM (nn.Module):
     """
     def __init__(self,
                  IN_in_channels       : int,  # in_channels == Out_channels in VIT experts and Unet experts
-                 IN_img_resolution    : int,  # seq_ln  = img_res ** 2
+                 IN_img_resolution    : int, # seq_ln  = img_res ** 2
+                 internal_channels    : int,
                  time_emb_dim         : int,
                  text_emb_dim         : int,
                  num_experts          : int,
@@ -115,6 +118,12 @@ class HDMOEM (nn.Module):
         """
         super().__init__()
         #assert IN_img_resolution ** 2 == VIT_seq_ln
+        self.internal_channels = internal_channels
+        self.input_proj = util.MP_Conv(
+            in_channels=IN_in_channels,
+            out_channels=self.internal_channels,
+            kernel=(3, 3)
+        )
         self.Fourier_emb = util.MP_Fourier(num_channels=time_emb_dim // 2,
                                            bandwidth=Fourier_bandwidth)
 
@@ -129,12 +138,12 @@ class HDMOEM (nn.Module):
         self.scaling_net = m.Scaling_router(emb_dim= time_emb_dim,
                                             num_experts= 2)
 
-        self.Unet_router = m.Router(in_channels= IN_in_channels,
+        self.Unet_router = m.Router(in_channels= self.internal_channels,
                                     time_dim= time_emb_dim,
                                     top_k= top_k,
                                     num_experts= num_experts)
 
-        self.vit_router = m.Router(in_channels=IN_in_channels,
+        self.vit_router = m.Router(in_channels=self.internal_channels,
                                     time_dim=time_emb_dim,
                                     top_k=top_k,
                                     num_experts= num_experts)
@@ -143,7 +152,7 @@ class HDMOEM (nn.Module):
         self.Unet_experts= nn.ModuleList()
         for i in range(num_experts):
             self.Unet_experts.append(m.Unet_expert(img_resolution= IN_img_resolution,
-                                                   img_channels= IN_in_channels,
+                                                   img_channels= self.internal_channels,
                                                    time_emb_dim= time_emb_dim,
                                                    text_emb_dim= text_emb_dim,
                                                    num_blocks=Unet_num_blocks,
@@ -158,8 +167,8 @@ class HDMOEM (nn.Module):
         for i in range(num_experts):
             self.VIT_experts.append(m.Vit_expert(num_heads= VIT_num_heads,
                                                   num_groups=VIT_num_groups,
-                                                  in_channels=IN_in_channels,
-                                                  seq_ln= (IN_img_resolution // VIT_patch_sizes[i]) ** 2,
+                                                  in_channels=self.internal_channels,
+                                                  seq_ln= math.ceil(IN_img_resolution / VIT_patch_sizes[i]) ** 2,
                                                   emb_dim=VIT_emb_size,
                                                   num_blocks= VIT_num_blocks,
                                                   patch_size= VIT_patch_sizes[i],
@@ -168,29 +177,35 @@ class HDMOEM (nn.Module):
                                                   ))
 
         self.cross_attn = util.MP_Attention(num_heads= VIT_num_heads,
-                                                  emb_dim= IN_in_channels,
+                                                  emb_dim= self.internal_channels,
                                                   seq_ln= IN_img_resolution ** 2,
-                                                  context_dim= IN_in_channels,
-                                                  attn_balance= 0.8,
+                                                  context_dim= self.internal_channels,
+                                                  attn_balance= 0.5,
                                                   is_cross_attn= True)
 
         self.cross_attn_text = util.MP_Attention(
             num_heads=VIT_num_heads,
-            emb_dim=IN_in_channels,
+            emb_dim=self.internal_channels,
             seq_ln=IN_img_resolution ** 2,
             context_dim=text_emb_dim,
             attn_balance=0.5,
             is_cross_attn=True
         )
 
-        self.gate1 = util.MP_Conv(in_channels= IN_in_channels * 2,
-                                  out_channels=IN_in_channels ,
+        self.gate1 = util.MP_Conv(in_channels= self.internal_channels * 2,
+                                  out_channels=self.internal_channels ,
                                   kernel=(1,1)
                                   )
-        self.gate2 = util.MP_Conv(in_channels= IN_in_channels ,
+        self.gate2 = util.MP_Conv(in_channels= self.internal_channels ,
                                   out_channels = 2,
                                   kernel=(1,1)
                                   )
+
+        self.output_proj = util.MP_Conv(
+            in_channels=self.internal_channels,
+            out_channels=IN_in_channels,
+            kernel=(3, 3)
+        )
 
     def forward(self,
                 x               : torch.Tensor, #shape -> (batch,in_channels,height, width)
@@ -198,12 +213,14 @@ class HDMOEM (nn.Module):
                 text_emb        : torch.Tensor, #shape -> (batch,text_seq_ln,text_emb_dim)
                 Unet_router_mask: torch.Tensor, #shape-> (batch,num_experts)
                 Vit_router_mask : torch.Tensor, #shape-> (batch,num_experts)
-                zeta            : float
+                zeta            : float,
+                alpha_routing: float = 10
                 )-> tuple[torch.Tensor,torch.Tensor,torch.Tensor,torch.Tensor,torch.Tensor,torch.Tensor]:
         """
         Forward pass of the Hybrid MoE.
 
         Args:
+            :param alpha_routing: for dynamic query\context swapping (we will test this logically)
             :param x : Input noisy image/latent.
                               Shape: (Batch, In_Channels, Height, Width).
             :param time_vec: Raw time steps or noise levels (sigma).
@@ -225,11 +242,12 @@ class HDMOEM (nn.Module):
         time_embed = self.Fourier_emb(x = time_vec)
         time_embed = self.out_fourier1(x = time_embed)
         time_embed = self.out_fourier2(x = util.mp_silu(x= time_embed))
+        x_feats = self.input_proj(x)
         scaling_factors = self.scaling_net(x = time_embed,zeta = zeta)
         scaling_vit = scaling_factors[:,0:1].view(-1, 1, 1, 1)
         scaling_Unet = scaling_factors[:,1:2].view(-1, 1, 1, 1)
-        in_unet_router = scaling_Unet * x
-        in_vit_router = scaling_vit * x
+        in_unet_router = scaling_Unet * x_feats
+        in_vit_router = scaling_vit * x_feats
         out_vit_router,Vit_gate_probs,vit_raw = self.vit_router(x = in_vit_router,
                                          time_emb = time_embed,
                                          zeta= zeta,
@@ -254,8 +272,16 @@ class HDMOEM (nn.Module):
                                            out_router=out_vit_router
                                             )
 
-        query = out_Unet_expert.flatten(2).transpose(1, 2)
-        context = out_Vit_expert.flatten(2).transpose(1, 2)
+        out_Unet_flat = out_Unet_expert.flatten(2).transpose(1, 2)
+        out_Vit_flat = out_Vit_expert.flatten(2).transpose(1, 2)
+        # Determine which path is stronger based on scaling factors
+        # scaling_vit and scaling_Unet sum to ~1.0
+        vit_strength_diff = scaling_vit - scaling_Unet
+        vit_is_stronger = torch.sigmoid(alpha_routing * vit_strength_diff).view(-1, 1, 1)
+        # Swap query and context based on which path is stronger
+        query = vit_is_stronger * out_Vit_flat + (1 - vit_is_stronger) * out_Unet_flat
+        context = vit_is_stronger * out_Unet_flat + (1 - vit_is_stronger) * out_Vit_flat
+
         out_final_attn = self.cross_attn(query = query,
                                           context = context,
                                           gain_s = 1.0,
@@ -270,7 +296,7 @@ class HDMOEM (nn.Module):
 
         final_feats = out_final_attn + self.alpha_txt * (final_feats - out_final_attn)
 
-        out_final_attn_img = final_feats.transpose(1, 2).view(B,C,H,W)
+        out_final_attn_img = final_feats.transpose(1, 2).view(B, self.internal_channels, H, W)
         in_gate = util.mp_cat(out_Unet_expert,out_final_attn_img,dim = 1)
         out_gate = self.gate1(in_gate)
         out_gate = self.gate2(util.mp_silu(out_gate))
@@ -279,7 +305,7 @@ class HDMOEM (nn.Module):
         Wa = out_gate[:,1:2]
         out_gated_attn = Wx * out_Unet_expert + Wa *  out_final_attn_img
         out = util.mp_sum(out_Unet_expert, out_gated_attn, t=0.5)
-
+        out = self.output_proj(out)
         return out, Unet_gate_probs, Unet_raw, Vit_gate_probs, vit_raw,scaling_factors
 
 
@@ -310,7 +336,8 @@ class preconditioned_HDMOEM(nn.Module):
     """
     def __init__(self,
                  IN_in_channels: int,  # in_channels == Out_channels in VIT experts and Unet experts
-                 IN_img_resolution: int,  # seq_ln  = img_res ** 2
+                 IN_img_resolution: int,
+                 internal_channels:int,# seq_ln  = img_res ** 2
                  time_emb_dim: int,
                  text_emb_dim: int,
                  num_experts: int,
@@ -340,10 +367,12 @@ class preconditioned_HDMOEM(nn.Module):
         super().__init__()
         self.sigma_data = sigma_data
         self.log_var_channels = log_var_channels
+        self.num_experts = num_experts
         self.log_var_fourier = util.MP_Fourier(num_channels= self.log_var_channels)
         self.log_var_linear = util.MP_Conv(in_channels= self.log_var_channels, out_channels=1, kernel=())
         self.net = HDMOEM(IN_in_channels = IN_in_channels,
-                          IN_img_resolution = IN_img_resolution,  # seq_ln  = img_res ** 2
+                          IN_img_resolution = IN_img_resolution,
+                          internal_channels=internal_channels,# seq_ln  = img_res ** 2
                           time_emb_dim= time_emb_dim,
                           text_emb_dim =text_emb_dim,
                           num_experts =num_experts,
@@ -406,6 +435,10 @@ class preconditioned_HDMOEM(nn.Module):
         c_out =  sigma * self.sigma_data / (sigma ** 2 + self.sigma_data ** 2).sqrt()
         c_in = 1 / (self.sigma_data ** 2 + sigma ** 2).sqrt()
         c_noise = sigma.flatten().log() / 4
+        batch_size = x.shape[0]
+        if c_noise.shape[0] == 1 and batch_size > 1:
+            c_noise = c_noise.expand(batch_size)
+
         x = x * c_in
         out_net,Unet_gate_probs,Unet_raw, Vit_gate_probs,vit_raw ,scaling_factors= self.net(x = x,
                            text_emb = text_emb,
