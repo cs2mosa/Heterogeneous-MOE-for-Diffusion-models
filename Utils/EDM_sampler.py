@@ -31,7 +31,8 @@ class EDM_Sampler:
         self.guide = guidance
         self.dtype = dtype
 
-    def denoise(self, x, sigma, text_emb, uncond_text_emb=None):
+    def denoise(self, x, sigma, text_emb,transition_mean,
+               softness,uncond_text_emb=None):
         """
         Denoise helper that handles Classifier-Free Guidance internally.
         """
@@ -46,6 +47,8 @@ class EDM_Sampler:
             Unet_router_mask=Unet_router_mask,
             Vit_router_mask=vit_router_mask,
             zeta=0,
+            transition_point=transition_mean,
+            softness=softness,
         )
         D_x = out_model["denoised"].to(self.dtype)
         if self.guide == 1.0:
@@ -59,6 +62,8 @@ class EDM_Sampler:
             Unet_router_mask=Unet_router_mask,
             Vit_router_mask=vit_router_mask,
             zeta=0,
+            transition_point=transition_mean,
+            softness=softness,
         )
         ref_D_x = out_guide["denoised"].to(self.dtype)
 
@@ -68,6 +73,8 @@ class EDM_Sampler:
     def sample(self,
                noise: torch.Tensor,
                text_emb: torch.Tensor,
+               transition_mean:float,
+               softness:float,
                uncond_text_emb: torch.Tensor = None
                ) -> torch.Tensor:
 
@@ -90,12 +97,12 @@ class EDM_Sampler:
 
             t_hat = t_cur + gamma * t_cur
             x_hat = x_cur + (t_hat ** 2 - t_cur ** 2).sqrt() * self.s_noise * torch.randn_like(x_cur)
-            denoised = self.denoise(x_hat, t_hat, text_emb, uncond_text_emb)
+            denoised = self.denoise(x_hat, t_hat, text_emb, transition_mean,softness, uncond_text_emb)
             d_cur = (x_hat - denoised) / t_hat
             x_next = x_hat + (t_next - t_hat) * d_cur
 
             if i < self.num_steps - 1:
-                denoised_prime = self.denoise(x_next, t_next, text_emb, uncond_text_emb)
+                denoised_prime = self.denoise(x_next, t_next, text_emb,transition_mean,softness, uncond_text_emb)
                 d_prime = (x_next - denoised_prime) / t_next
                 x_next = x_hat + (t_next - t_hat) * (0.5 * d_cur + 0.5 * d_prime)
 

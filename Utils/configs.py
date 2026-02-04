@@ -16,7 +16,7 @@ model_configs = {
         'VIT_num_blocks': 6,
         'VIT_patch_sizes': [4, 8, 8, 16],
         'VIT_num_groups': 4,
-        'VIT_num_heads': 4,
+        'VIT_num_heads': 8,
         'VIT_emb_size': 32,
         'Unet_num_blocks': 3,
         'Unet_channel_mult': [1, 2, 4],
@@ -27,23 +27,21 @@ model_configs = {
         'Unet_concat_balance': 0.5,
         'sigma_data': 0.5,
         'log_var_channels': 32,
-        'batch_size': 64,
+        'batch_size': 32,
         'total_steps': 5000,
         'sigma_min': 0.002,
         'sigma_max': 80,
         "fixed_prompt": "a photo of a flower"
 }
 loss_configs = {
-    'unet_bal': 0.01,
-    'vit_bal': 0.01,
-    'z_bal': 0.002,
-    'prior_bal': 0.002,
-    'transition_sigma': 1.0,
-    'sharpness': 2.0
+    'unet_bal': 0.05,
+    'vit_bal': 0.05,
+    'z_bal': 0.005,
+    'prior_bal': 0.0,
 }
 optim_configs = {
     'eta_min': 1e-5,
-    'lr': 1e-4
+    'lr': 1e-3
 }
 mask_configs ={
     'unet_attr': [3, 3, 5, 5],
@@ -52,7 +50,7 @@ mask_configs ={
     'p_std': 1.2,  # should be tuned
     'BW': 0.3,
     'max_BW': 0.8,# should be tuned
-    'min_active': 2,
+    'min_active': 1,
     'step_size': 0.1,
     'strat_band': 'step',
     'unet_noise_range': (0.0 , 0.6),
@@ -60,8 +58,8 @@ mask_configs ={
 }
 zeta_configs= {
     'min_zeta': 0.01,
-    'max_zeta': 2.0,
-    'warmup_ratio': 0.1,
+    'max_zeta': 1.5,
+    'warmup_ratio': 0.05,
     "strategy": 'cos',
     'alpha': 4.0
 }

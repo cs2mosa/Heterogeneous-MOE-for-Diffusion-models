@@ -104,16 +104,16 @@ class EDM_LOSS(nn.Module):
 
         denoising_loss = torch.mean((out_model["denoised"] - x) ** 2)
         router_loss = (self.Unet_lambda * self.load_balance(out_model["Unet_router_loss"],self.num_experts) + self.vit_lambda * self.load_balance(out_model["vit_router_loss"],self.num_experts)).clamp(max=50)
-        scaling_loss = (self.prior_bal * self.prior_path_loss(out_model["scaling_net_out"],sigma)).clamp(max=50)
+        #scaling_loss = (self.prior_bal * self.prior_path_loss(out_model["scaling_net_out"],sigma)).clamp(max=50)
         z_los = (self.z_bal * self.z_loss(out_model["Unet_raw"]) + self.z_bal * self.z_loss(out_model["vit_raw"])).clamp(max=50)
-        total_loss = (pure_loss + z_los + router_loss + scaling_loss).clamp(max=50)
+        total_loss = (pure_loss + z_los + router_loss ).clamp(max=50) #+ scaling_loss
 
         return {
             "loss": total_loss,
             "denoising": denoising_loss,
             "balance": router_loss,
             "z_loss": z_los,
-            "entropy": scaling_loss,
+            "entropy": 0.0,
             "pure_loss": pure_loss
         }
 

@@ -72,6 +72,8 @@ class Logger:
                          zeta: float,
                          log_var: float,
                          lr: float,
+                         p_mean:float,
+                         p_std: float,
                          sigma: Optional[torch.Tensor] = None):
         """
         Log main training metrics.
@@ -107,7 +109,7 @@ class Logger:
             # Track average sigma percentile
             log_sigma = torch.log(sigma)
             sigma_pct = 0.5 * (1 + torch.erf(
-                (log_sigma - (-0.4)) / (1.0 * np.sqrt(2))
+                (log_sigma - p_mean) / (p_std * np.sqrt(2))
             ))
             self.accumulators['avg_sigma_percentile'].append(
                 sigma_pct.mean().item()
@@ -121,6 +123,8 @@ class Logger:
                               step: int,
                               unet_probs: torch.Tensor,
                               vit_probs: torch.Tensor,
+                              p_mean: float,
+                              p_std: float,
                               sigma: torch.Tensor):
         """
         Log detailed router statistics.
@@ -138,7 +142,7 @@ class Logger:
             # Convert sigma to percentile
             log_sigma = torch.log(sigma)
             sigma_pct = 0.5 * (1 + torch.erf(
-                (log_sigma - (-0.4)) / (1.0 * np.sqrt(2))
+                (log_sigma - p_mean) / (p_std * np.sqrt(2))
             ))
             
             # Calculate entropy (diversity metric)
@@ -190,15 +194,15 @@ class Logger:
             self._write_jsonl(self.router_log_file, record)
     
     def log_scaling_gating(self,
-                          step: int,
-                          scaling_factors: torch.Tensor,
-                          gate_weights: torch.Tensor,
-                          sigma: torch.Tensor):
+                           scaling_factors: torch.Tensor,
+                           gate_weights: torch.Tensor,
+                           sigma: torch.Tensor):
         """
         Log scaling network and gating behavior.
         
         Args:
-            step: Current training step
+            p_std:
+            p_mean:
             scaling_factors: Scaling network output (B, 2) [vit, unet]
             gate_weights: Final gate weights (B, 2) [wx, wa]
             sigma: Noise levels (B,)
@@ -215,14 +219,11 @@ class Logger:
         self.accumulators['gate_wa'].append(
             gate_weights[:, 1].mean().item()
         )
-        
-        # Convert sigma to percentile
-        log_sigma = torch.log(sigma)
-        sigma_pct = 0.5 * (1 + torch.erf(
-            (log_sigma - (-0.4)) / (1.0 * np.sqrt(2))
-        ))
+        self.accumulators['noise_level_min'].append(sigma.min().item())
+        self.accumulators['noise_level_max'].append(sigma.max().item())
+        self.accumulators['noise_level_std'].append(sigma.std().item())
         self.accumulators['noise_level'].append(
-            sigma_pct.mean().item()
+            sigma.mean().item()
         )
     
     def log_gradients(self,
