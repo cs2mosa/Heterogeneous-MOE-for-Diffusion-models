@@ -23,6 +23,43 @@ def sample_sigma(batch_size: int,
 
     return sigma_vec
 
+def sample_sigma_hybrid(batch_size,
+                        sigma_min=0.002,
+                        sigma_max=80.0,
+                        p_mean=-0.4,  # Adjusted for Latent Space
+                        p_std=1.0,  # Adjusted for Latent Space
+                        extreme_prob=0.2,
+                        device='cuda'):
+    """
+    Hybrid Sampler:
+    Ensures 'Core' training via Log-Normal (80%)
+    and 'Expert Coverage' via Log-Uniform (20%).
+    """
+
+    # 1. Calculate counts
+    n_lognormal = int(batch_size * (1 - extreme_prob))
+    n_uniform = batch_size - n_lognormal
+
+    # 2. Log-Normal Samples (The EDM2 core)
+    # Focuses on the most informative noise levels for the average expert
+    rnd_normal = torch.randn([n_lognormal, 1, 1, 1], device=device)
+    sigma_lognormal = (rnd_normal * p_std + p_mean).exp()
+
+    # 3. Log-Uniform Samples (The MoE safety floor)
+    # Ensures Structural and Detail experts get consistent gradients
+    log_min = math.log(sigma_min)
+    log_max = math.log(sigma_max)
+    u = torch.rand([n_uniform, 1, 1, 1], device=device)
+    sigma_uniform = (u * (log_max - log_min) + log_min).exp()
+
+    # 4. Combine, Clamp, and Shuffle
+    # Shuffling is vital so the batch doesn't have 'easy' and 'hard' halves
+    sigma = torch.cat([sigma_lognormal, sigma_uniform], dim=0)
+    sigma = sigma.clamp(sigma_min, sigma_max)
+
+    perm = torch.randperm(batch_size, device=device)
+    return sigma[perm]
+
 def lr_scheduler()->float:
     pass
 
@@ -94,7 +131,8 @@ class EDM_LOSS(nn.Module):
                  out_model: dict[str,torch.Tensor]
                  )->dict[str,torch.Tensor]:
 
-        lamda = (sigma_vec ** 2 + self.sigma_data ** 2)/ (sigma_vec * self.sigma_data) ** 2
+        lamda = 1
+        #lamda = (sigma_vec ** 2 + self.sigma_data ** 2)/ (sigma_vec * self.sigma_data) ** 2
         if out_model["log_var"] is None:
             pure_loss = torch.mean(lamda * ((out_model["denoised"] - x) ** 2))
         else:

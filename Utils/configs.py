@@ -13,13 +13,13 @@ model_configs = {
         'num_experts': 4,
         'top_k': 1,
         'fourier_bandwidth': 1.0,
-        'VIT_num_blocks': 6,
+        'VIT_num_blocks': 4,
         'VIT_patch_sizes': [4, 8, 8, 16],
         'VIT_num_groups': 4,
         'VIT_num_heads': 8,
         'VIT_emb_size': 32,
-        'Unet_num_blocks': 3,
-        'Unet_channel_mult': [1, 2, 4],
+        'Unet_num_blocks': 2,
+        'Unet_channel_mult': [1, 2],
         'Unet_kernel_sizes': [(3, 3), (3, 3), (5, 5), (5, 5)],
         'Unet_model_channels': 32,
         'Unet_channel_mult_emb': 2,
@@ -35,19 +35,23 @@ model_configs = {
 }
 loss_configs = {
     'unet_bal': 0.05,
-    'vit_bal': 0.05,
+    'vit_bal': 0.1,
     'z_bal': 0.005,
     'prior_bal': 0.0,
 }
 optim_configs = {
     'eta_min': 1e-5,
-    'lr': 1e-3
+    'lr_vit': 2e-3,
+    'lr_unet': 5e-4,
+    'lr_attn':1e-3,
+    'lr_router': 5e-4,
+    'total_schedule_steps': 5000 # steepness calculation depends on this
 }
 mask_configs ={
     'unet_attr': [3, 3, 5, 5],
     'vit_attr': [4, 8, 8, 16],
     'p_mean': -1.2,  # should be tuned
-    'p_std': 1.2,  # should be tuned
+    'p_std': 1.6,  # should be tuned
     'BW': 0.3,
     'max_BW': 0.8,# should be tuned
     'min_active': 1,
@@ -58,8 +62,9 @@ mask_configs ={
 }
 zeta_configs= {
     'min_zeta': 0.01,
-    'max_zeta': 1.5,
+    'max_zeta': 2,
     'warmup_ratio': 0.05,
     "strategy": 'cos',
-    'alpha': 4.0
+    'alpha': 4.0,
+    'total_schedule_steps': 900 # steepness calculation depends on this
 }

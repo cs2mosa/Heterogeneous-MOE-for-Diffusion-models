@@ -201,17 +201,23 @@ class Logger:
         Log scaling network and gating behavior.
         
         Args:
-            p_std:
-            p_mean:
             scaling_factors: Scaling network output (B, 2) [vit, unet]
             gate_weights: Final gate weights (B, 2) [wx, wa]
             sigma: Noise levels (B,)
         """
-        self.accumulators['scaling_vit'].append(
+        self.accumulators['scaling_vit_mean'].append(
             scaling_factors[:, 0].mean().item()
         )
-        self.accumulators['scaling_unet'].append(
+        self.accumulators['scaling_unet_mean'].append(
             scaling_factors[:, 1].mean().item()
+        )
+        self.accumulators['scaling_vit_max'].append(scaling_factors[:, 0].max().item())
+        self.accumulators['scaling_vit_min'].append(scaling_factors[:, 0].min().item())
+        self.accumulators['scaling_unet_min'].append(
+            scaling_factors[:, 1].min().item()
+        )
+        self.accumulators['scaling_unet_max'].append(
+            scaling_factors[:, 1].max().item()
         )
         self.accumulators['gate_wx'].append(
             gate_weights[:, 0].mean().item()

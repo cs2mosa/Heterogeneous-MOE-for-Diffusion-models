@@ -14,7 +14,7 @@ import json
 from tqdm import tqdm
 from matplotlib.gridspec import GridSpec
 from scipy.ndimage import gaussian_filter1d
-from typing import Optional, List, Dict, Union
+from typing import Optional
 import warnings
 
 warnings.filterwarnings('ignore')
@@ -312,7 +312,7 @@ class Plotter:
         if df is None: return
 
         # Check if required columns exist
-        req_cols = ['scaling_vit', 'scaling_unet', 'gate_wx', 'gate_wa', 'step']
+        req_cols = ['scaling_vit_mean', 'scaling_unet_mean', 'gate_wx', 'gate_wa', 'step']
         if not all(col in df.columns for col in req_cols):
             print("⚠️ Scaling/Gating columns not found in log file.")
             return
@@ -322,8 +322,8 @@ class Plotter:
 
         # --- 1. Scaling Factors Evolution ---
         ax1 = fig.add_subplot(gs[0, :])
-        ax1.plot(df['step'], df['scaling_vit'], label='ViT Scale', color='tab:blue', alpha=0.7)
-        ax1.plot(df['step'], df['scaling_unet'], label='UNet Scale', color='tab:orange', alpha=0.7)
+        ax1.plot(df['step'], df['scaling_vit_mean'], label='ViT Scale', color='tab:blue', alpha=0.7)
+        ax1.plot(df['step'], df['scaling_unet_mean'], label='UNet Scale', color='tab:orange', alpha=0.7)
         ax1.set_title('Scaling Factors Evolution (Avg per batch)')
         ax1.set_xlabel('Step')
         ax1.legend()
@@ -332,14 +332,14 @@ class Plotter:
         if 'noise_level' in df.columns:
             ax2 = fig.add_subplot(gs[1, 0])
             # Scatter plot coloring by step to see time evolution
-            sc = ax2.scatter(df['noise_level'], df['scaling_vit'], c=df['step'], cmap='viridis', s=10, alpha=0.5)
+            sc = ax2.scatter(df["avg_sigma_percentile"], df['scaling_vit_mean'], c=df['step'], cmap='viridis', s=10, alpha=0.5)
             ax2.set_title('ViT Scaling vs Noise Level')
             ax2.set_xlabel('Noise Percentile (Avg)')
             ax2.set_ylabel('ViT Scale')
             plt.colorbar(sc, ax=ax2, label='Step')
 
             ax3 = fig.add_subplot(gs[1, 1])
-            sc2 = ax3.scatter(df['noise_level'], df['scaling_unet'], c=df['step'], cmap='plasma', s=10, alpha=0.5)
+            sc2 = ax3.scatter(df["avg_sigma_percentile"], df['scaling_unet_mean'], c=df['step'], cmap='plasma', s=10, alpha=0.5)
             ax3.set_title('UNet Scaling vs Noise Level')
             ax3.set_xlabel('Noise Percentile (Avg)')
             plt.colorbar(sc2, ax=ax3, label='Step')
@@ -354,8 +354,8 @@ class Plotter:
         # --- 4. Consistency Check ---
         ax5 = fig.add_subplot(gs[2, 1])
         # Correlation between scaling and gating
-        ax5.scatter(df['scaling_unet'], df['gate_wx'], alpha=0.3, label='UNet Scale vs Wx')
-        ax5.scatter(df['scaling_vit'], df['gate_wa'], alpha=0.3, label='ViT Scale vs Wa')
+        ax5.scatter(df['scaling_unet_mean'], df['gate_wx'], alpha=0.3, label='UNet Scale vs Wx')
+        ax5.scatter(df['scaling_vit_mean'], df['gate_wa'], alpha=0.3, label='ViT Scale vs Wa')
         ax5.set_title('Consistency: Scale vs Gate Weight')
         ax5.set_xlabel('Scaling Factor')
         ax5.set_ylabel('Gate Weight')
